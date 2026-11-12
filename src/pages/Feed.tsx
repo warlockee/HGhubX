@@ -1302,8 +1302,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           seekKey={playKey}
           nextDisabled={nextEp == null && index >= videoIds.length - 1}
           nextTitle={nextEp != null ? "下一集 E" : "下一部 ↓"}
-          swipeEp={swipeEp}
-          onToggleSwipe={() => { setSwipeEp(!swipeEp); toast(swipeEp ? "上下划切集已关闭" : "上下划切集已开启"); }}
           onToggle={() => videoRef.current?.toggle()}
           onSeek={(t, source) => { videoRef.current?.seek(t, source); setTime(t); }}
           onSeekInteraction={(phase, input, target, pointerTarget) => videoRef.current?.trace(`seek.input.${phase}`, { input, target, pointer_target: pointerTarget })}
