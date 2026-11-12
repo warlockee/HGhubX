@@ -19,7 +19,9 @@
     "android:init": "tauri android init",
     "android:icons": "node scripts/sync-android-icons.mjs",
     "android:dev": "tauri android dev",
-    "android:build": "tauri android build"
+    "android:build": "tauri android build",
+    "test:gestures": "node scripts/test-gestures.mjs",
+    "test:feed-controls": "node scripts/test-feed-controls.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

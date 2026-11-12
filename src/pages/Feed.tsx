@@ -5,6 +5,7 @@ import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "../components/ui";
 import VideoSurface, { type VideoHandle } from "../player/VideoSurface";
 import PlayerControls from "../player/PlayerControls";
+import { createWheelTracker } from "../player/gestures";
 import PlaybackLock from "../player/PlaybackLock";
 import { ArticlePanel, CommentsPanel, EpisodesPanel } from "../components/Panels";
 import { RowCard } from "../components/cards";
@@ -425,6 +426,88 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* ── 进度 / 音量 操作：键盘与触控板共用，并给出屏幕提示（OSD） ── */
+  const [osd, setOsd] = useState<{ kind: "seek" | "volume"; text: string; sub?: string; pct?: number } | null>(null);
+  const osdTimer = useRef(0);
+  const showOsd = useCallback((o: NonNullable<typeof osd>) => {
+    setOsd(o);
+    window.clearTimeout(osdTimer.current);
+    osdTimer.current = window.setTimeout(() => setOsd(null), 1000);
+  }, []);
+  useEffect(() => () => window.clearTimeout(osdTimer.current), []);
+
+  // 连续操作（按住按键 / 触控板滑动）时 state 里的 time / volume 还没来得及刷新，
+  // 所以在“待生效的目标值”上累加，避免每一下都从旧值起算而卡住不动。
+  const timeRef = useRef(0); timeRef.current = time;
+  const durationRef = useRef(0); durationRef.current = duration;
+  const volRef = useRef(volume); volRef.current = volume;
+  const mutedRef = useRef(muted); mutedRef.current = muted;
+  const pendingSeek = useRef<number | null>(null);
+  const pendingSeekTimer = useRef(0);
+  const pendingVol = useRef<number | null>(null);
+  const pendingVolTimer = useRef(0);
+
+  const seekBy = useCallback((delta: number, source: string) => {
+    const dur = durationRef.current;
+    const base = pendingSeek.current ?? timeRef.current;
+    const target = Math.max(0, dur > 0 ? Math.min(dur - 0.5, base + delta) : base + delta);
+    pendingSeek.current = target;
+    window.clearTimeout(pendingSeekTimer.current);
+    pendingSeekTimer.current = window.setTimeout(() => { pendingSeek.current = null; }, 700);
+    videoRef.current?.seek(target, source);
+    const shown = Math.round(target - (timeRef.current || 0));
+    showOsd({ kind: "seek", text: `${fmtTime(target)} / ${fmtTime(dur)}`, sub: `${shown >= 0 ? "+" : "−"}${Math.abs(shown)}s` });
+  }, [showOsd]);
+
+  const volumeBy = useCallback((delta: number) => {
+    // 静音中：调大先解除静音；调小只提示，不要把“静音”悄悄变成有声
+    if (mutedRef.current && delta < 0) { showOsd({ kind: "volume", text: "已静音", pct: 0 }); return; }
+    const base = pendingVol.current ?? volRef.current;
+    const v = Math.round(Math.max(0, Math.min(1, base + delta)) * 100) / 100;
+    pendingVol.current = v;
+    window.clearTimeout(pendingVolTimer.current);
+    pendingVolTimer.current = window.setTimeout(() => { pendingVol.current = null; }, 500);
+    setVolume(v);
+    showOsd({ kind: "volume", text: v === 0 ? "静音" : `音量 ${Math.round(v * 100)}%`, pct: v });
+  }, [setVolume, showOsd]);
+
+  /* 触控板双指（或鼠标滚轮）：横向 = 进度，纵向 = 音量。仅桌面端；
+     手指方向为准——与系统「自然滚动」设置无关（WebKit 用 webkitDirectionInvertedFromDevice 还原）。 */
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || !isDesktop || !active || controlsLocked) return;
+    const track = createWheelTracker();
+    const g = { seekAcc: 0, timer: 0 };
+    const flush = () => {
+      g.timer = 0;
+      if (Math.abs(g.seekAcc) >= 0.5) { const d = g.seekAcc; g.seekAcc = 0; seekBy(d, "trackpad_swipe"); }
+    };
+    const scrollableAncestor = (target: EventTarget | null) => {
+      for (let n = target as HTMLElement | null; n && n !== el; n = n.parentElement) {
+        if (!(n instanceof HTMLElement)) continue;
+        const oy = getComputedStyle(n).overflowY;
+        if ((oy === "auto" || oy === "scroll") && n.scrollHeight > n.clientHeight + 1) return true;
+      }
+      return false;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) return; // 触控板捏合缩放，交给原有逻辑
+      if (scrollableAncestor(e.target)) return; // 简介等可滚动区域保持原生滚动
+      e.preventDefault();
+      const act = track(e as WheelEvent & { webkitDirectionInvertedFromDevice?: boolean }, performance.now());
+      if (!act) return;
+      if (act.kind === "seek") {
+        // 攒一下再统一 seek，别每个滚轮事件都打到播放引擎
+        g.seekAcc += act.seconds;
+        if (!g.timer) g.timer = window.setTimeout(flush, 120);
+      } else {
+        volumeBy(act.delta);
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => { el.removeEventListener("wheel", onWheel); window.clearTimeout(g.timer); };
+  }, [isDesktop, active, controlsLocked, seekBy, volumeBy]);
+
   /* 键盘 */
   useEffect(() => {
     if (!active || controlsLocked) return;
@@ -433,11 +516,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
       if (panel) { if (e.key === "Escape") setPanel(null); return; }
       switch (e.key) {
-        case "ArrowDown": e.preventDefault(); stepDir(1); break;
-        case "ArrowUp": e.preventDefault(); stepDir(-1); break;
+        // ↑↓ 音量，←→ 进度（Shift 加大步长）；切上一个 / 下一个视频改用 PageUp / PageDown 与右侧按钮
+        case "ArrowUp": e.preventDefault(); volumeBy(e.shiftKey ? 0.01 : 0.05); break;
+        case "ArrowDown": e.preventDefault(); volumeBy(e.shiftKey ? -0.01 : -0.05); break;
+        case "ArrowLeft": e.preventDefault(); seekBy(e.shiftKey ? -15 : -5, "keyboard_shortcut"); break;
+        case "ArrowRight": e.preventDefault(); seekBy(e.shiftKey ? 15 : 5, "keyboard_shortcut"); break;
+        case "PageDown": e.preventDefault(); stepDir(1); break;
+        case "PageUp": e.preventDefault(); stepDir(-1); break;
         case " ": e.preventDefault(); videoRef.current?.toggle(); break;
-        case "ArrowLeft": e.preventDefault(); videoRef.current?.seek(Math.max(0, time - 5), "keyboard_shortcut"); break;
-        case "ArrowRight": e.preventDefault(); videoRef.current?.seek(time + 5, "keyboard_shortcut"); break;
         case "f": case "F": toggleFull(); break;
         case "t": case "T": setTheater((v) => !v); break;
         case "m": case "M": setMuted((v) => !v); break;
@@ -451,7 +537,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, controlsLocked, panel, time, index, stepDir]);
+  }, [active, controlsLocked, panel, index, stepDir, seekBy, volumeBy]);
 
   /* 安卓返回键：面板打开时先关面板 */
   useEffect(() => {
@@ -868,6 +954,23 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       <div className="absolute inset-0 scale-110 blur-3xl opacity-25 pointer-events-none">
         {posterUrl && <img src={posterUrl} alt="" className="w-full h-full object-cover" />}
       </div>
+
+      {osd && (
+        <div className="absolute left-1/2 top-[12%] -translate-x-1/2 z-30 pointer-events-none rounded-full bg-black/65 text-white backdrop-blur px-4 py-2 flex items-center gap-2.5 text-[13px] a-rise" role="status" aria-live="polite">
+          {osd.kind === "volume" ? (
+            <>
+              {(osd.pct ?? 0) === 0 ? <IVolMute size={16} /> : <IVol size={16} />}
+              <div className="w-28 h-1.5 rounded-full bg-white/25 overflow-hidden"><div className="h-full bg-white" style={{ width: `${Math.round((osd.pct ?? 0) * 100)}%` }} /></div>
+              <span className="tabular-nums min-w-[4.5em] text-right">{osd.text}</span>
+            </>
+          ) : (
+            <>
+              <span className="tabular-nums">{osd.text}</span>
+              {osd.sub && <span className="tabular-nums text-white/70">{osd.sub}</span>}
+            </>
+          )}
+        </div>
+      )}
 
       <div ref={boxRef} onScroll={onScroll}
         className={`absolute inset-y-0 left-0 no-bar ${fs ? "overflow-hidden" : "overflow-y-scroll snap-y snap-mandatory overscroll-y-contain"}`}
