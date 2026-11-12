@@ -23,7 +23,9 @@ on:
         default: ""
 
 concurrency:
-  group: release-${{ github.ref }}-${{ github.event_name }}-${{ github.run_id }}
+  # 同一 ref 上任何新 run（重复 dispatch / 重跑）都会取消在跑的旧 run，
+  # 避免「两个一样的 runner 同时跑」；不同分支/标签互不干扰。
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 env:
