@@ -1,0 +1,79 @@
+// 字幕后处理的单元测试（纯逻辑，不需要 whisper / 翻译模型）。
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { cleanCues, parseTranslateProgress, parseWhisperProgress, sentencesFromWhisper } from "../nas-backend/subtitles.mjs";
+
+const tok = (text, from, to) => ({ text, offsets: { from, to } });
+
+test("按句拆分：用词级时间戳定位每句起止", () => {
+  const seg = { text: "こんにちは。元気ですか。", offsets: { from: 100, to: 4000 }, tokens: [
+    tok("[_BEG_]", 0, 0), tok("こんにちは", 100, 900), tok("。", 900, 1000),
+    tok("元気", 1500, 2200), tok("ですか", 2200, 3000), tok("。", 3000, 3300), tok("[_TT_200]", 4000, 4000),
+  ] };
+  const out = sentencesFromWhisper([seg]);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[0], { s: 0.1, e: 1, t: "こんにちは。" });
+  assert.equal(out[1].t, "元気ですか。");
+  assert.equal(out[1].s, 1.5);
+  assert.equal(out[1].e, 3.3);
+});
+
+test("静音检测（VAD）模式：词级时间在压缩时间线上，必须以段落起点为锚点还原到原片时间", () => {
+  // 真实数据形态：段落起点是原片里的位置（1272s），词级时间却从 12s 开始（静音被拼掉了）
+  const seg = { offsets: { from: 1272300, to: 1273200 }, text: "あ、プレゼント。", tokens: [
+    tok("[_BEG_]", 0, 0), tok("あ", 12000, 12300), tok("、", 12300, 12400), tok("プレゼント", 12400, 12900), tok("。", 12900, 13000),
+  ] };
+  const [c] = sentencesFromWhisper([seg]);
+  assert.equal(c.s, 1272.3, "句子起点 = 段落起点");
+  assert.ok(Math.abs(c.e - 1273.3) < 1e-6, `句子时长按词级差值：${c.e}`);
+  // 多段落：结果按原片时间有序，不会被压缩时间线挤到开头
+  const many = sentencesFromWhisper([
+    { offsets: { from: 500, to: 900 }, tokens: [tok("a。", 0, 400)] },
+    { offsets: { from: 509900, to: 510400 }, tokens: [tok("b。", 10000, 10400)] },
+    { offsets: { from: 3642500, to: 3643000 }, tokens: [tok("c。", 25000, 25400)] },
+  ]);
+  assert.deepEqual(many.map((x) => Math.round(x.s)), [1, 510, 3643]);
+});
+
+test("没有标点但有长停顿：在停顿处断开；过长的句子强制断开", () => {
+  const pause = sentencesFromWhisper([{ tokens: [tok("あ", 0, 300), tok("い", 300, 600), tok("う", 3000, 3300)] }]);
+  assert.deepEqual(pause.map((c) => c.t), ["あい", "う"]);
+  const long = sentencesFromWhisper([{ tokens: Array.from({ length: 30 }, (_, i) => tok("x", i * 500, i * 500 + 400)) }]);
+  assert.ok(long.length >= 2, "超过 9 秒应拆开");
+  assert.ok(long.every((c) => c.e - c.s <= 9.5));
+});
+
+test("没有词级时间戳时按字数比例分配时间", () => {
+  const out = sentencesFromWhisper([{ text: "Hola. ¿Cómo estás?", offsets: { from: 0, to: 4000 } }]);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].s, 0);
+  assert.ok(out[0].e > 0 && Math.abs(out[0].e - out[1].s) < 1e-9 && out[1].e === 4);
+});
+
+test("过滤幻听、非语音标注、循环重复，并修正过短 / 重叠的时间", () => {
+  const cues = cleanCues([
+    { s: 0, e: 2, t: "ご視聴ありがとうございました" },
+    { s: 2, e: 4, t: "[音楽]" },
+    { s: 4, e: 6, t: "♪~" },
+    { s: 6, e: 8, t: "Thank you." },
+    { s: 8, e: 9, t: "おはよう" },
+    { s: 9, e: 10, t: "おはよう" },
+    { s: 10, e: 11, t: "おはよう" },
+    { s: 11, e: 12, t: "おはよう" },
+    { s: 20, e: 20.1, t: "本物の台詞" },
+  ], "ja");
+  assert.deepEqual(cues.map((c) => c.t), ["おはよう", "おはよう", "本物の台詞"]);
+  assert.ok(cues[2].e - cues[2].s >= 0.6, "过短的字幕要拉长到可读");
+  // 英语片里的 Thank you 是真台词
+  assert.equal(cleanCues([{ s: 0, e: 1, t: "Thank you." }], "en").length, 1);
+  // 重叠的时间被截断，不会盖住下一条
+  const o = cleanCues([{ s: 0, e: 5, t: "a" }, { s: 3, e: 6, t: "b" }], "en");
+  assert.ok(o[0].e <= o[1].s);
+});
+
+test("进度解析", () => {
+  assert.equal(parseWhisperProgress("whisper_print_progress_callback: progress =  45%"), 0.45);
+  assert.equal(parseWhisperProgress("other"), null);
+  assert.equal(parseTranslateProgress("PROGRESS 8/16"), 0.5);
+  assert.equal(parseTranslateProgress("hello"), null);
+});

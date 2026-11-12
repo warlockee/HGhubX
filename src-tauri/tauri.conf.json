@@ -48,7 +48,9 @@
       "versionCode": 1003000
     },
     "resources": {
-      "../nas-backend/server.mjs": "nas-backend/server.mjs"
+      "../nas-backend/server.mjs": "nas-backend/server.mjs",
+      "../nas-backend/subtitles.mjs": "nas-backend/subtitles.mjs",
+      "../nas-backend/translate.py": "nas-backend/translate.py"
     }
   }
 }

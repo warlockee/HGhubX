@@ -6,6 +6,10 @@ import { Avatar, Img, Sheet } from "../components/ui";
 import VideoSurface, { type VideoHandle } from "../player/VideoSurface";
 import PlayerControls from "../player/PlayerControls";
 import { createWheelTracker } from "../player/gestures";
+import SubtitleLayer from "../player/SubtitleLayer";
+import SubtitleMenu from "../player/SubtitleMenu";
+import { useSubtitles } from "../player/useSubtitles";
+import { nextSubMode } from "../subtitles";
 import PlaybackLock from "../player/PlaybackLock";
 import { ArticlePanel, CommentsPanel, EpisodesPanel } from "../components/Panels";
 import { RowCard } from "../components/cards";
@@ -17,7 +21,7 @@ import {
 } from "../player/session";
 import {
   IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IFileText, IHeart, IHeartF,
-  ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVertSwap, IVol, IVolMute,
+  ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVertSwap, IVol, IVolMute, ICaptions,
 } from "../icons";
 
 type Props = {
@@ -426,6 +430,15 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* ── 字幕：本地语音识别 + 翻译（仅内置 NAS 后端提供；其它数据源没有就不显示入口） ── */
+  const { gate, subMode, setSubMode } = store;
+  const subs = useSubtitles({ base: gate.base, videoId: curId, ep: curEp, enabled: kind === "video" && active, onDone: () => toast("字幕已生成", "ok") });
+  const [subOpen, setSubOpen] = useState(false);
+  const [subDelay, setSubDelay] = useState(0); // 字幕延迟（秒，正 = 字幕晚出现），只对当前这集生效
+  useEffect(() => { setSubDelay(0); setSubOpen(false); }, [playKey]);
+  const subDone = subs.status.state === "done" && subs.cues.length > 0;
+  const getVideoTime = useCallback(() => videoRef.current?.el()?.currentTime ?? 0, []);
+
   /* ── 进度 / 音量 操作：键盘与触控板共用，并给出屏幕提示（OSD） ── */
   const [osd, setOsd] = useState<{ kind: "seek" | "volume"; text: string; sub?: string; pct?: number } | null>(null);
   const osdTimer = useRef(0);
@@ -514,8 +527,19 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const fn = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (subOpen) { if (e.key === "Escape") setSubOpen(false); return; }
       if (panel) { if (e.key === "Escape") setPanel(null); return; }
       switch (e.key) {
+        // 字幕：V 在 关 → 双语 → 中文 → 原文 间切换（还没有字幕就打开菜单）；[ ] 调整字幕快慢
+        case "v": case "V":
+          if (!subs.supported) break;
+          if (!subDone) { setSubOpen(true); break; }
+          { const m = nextSubMode(subMode, subs.translated); setSubMode(m); showOsd({ kind: "seek", text: `字幕：${({ off: "关闭", zh: "中文", orig: "原文", both: "双语" })[m]}` }); }
+          break;
+        case "[": case "]":
+          if (!subDone) break;
+          { const d = Math.round((subDelay + (e.key === "]" ? 0.5 : -0.5)) * 10) / 10; setSubDelay(d); showOsd({ kind: "seek", text: `字幕${d >= 0 ? "延后" : "提前"} ${Math.abs(d)} 秒` }); }
+          break;
         // ↑↓ 音量，←→ 进度（Shift 加大步长）；切上一个 / 下一个视频改用 PageUp / PageDown 与右侧按钮
         case "ArrowUp": e.preventDefault(); volumeBy(e.shiftKey ? 0.01 : 0.05); break;
         case "ArrowDown": e.preventDefault(); volumeBy(e.shiftKey ? -0.01 : -0.05); break;
@@ -537,7 +561,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, controlsLocked, panel, index, stepDir, seekBy, volumeBy]);
+  }, [active, controlsLocked, panel, subOpen, subDone, subDelay, subMode, subs.supported, subs.translated, index, stepDir, seekBy, volumeBy]);
 
   /* 安卓返回键：面板打开时先关面板 */
   useEffect(() => {
@@ -1026,6 +1050,11 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               <div className="absolute inset-0 pointer-events-none"
                 style={{ background: "linear-gradient(0deg, rgba(8,11,15,.3) 0, rgba(11,14,20,.06) 18%, transparent 36%)" }} />
 
+              {/* 字幕 */}
+              {isActive && subDone && subMode !== "off" && (
+                <SubtitleLayer cues={subs.cues} mode={subMode} translated={subs.translated} delay={subDelay} getTime={getVideoTime} />
+              )}
+
               {/* 顶部 */}
               {!fs && !clean && mode === "context" ? (
                 isDesktop ? (
@@ -1132,6 +1161,12 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     <ILink size={25} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">分享</span>
                   </button>
+                  {subs.supported && kind === "video" && (
+                    <button onClick={() => setSubOpen((v) => !v)} className="flex flex-col items-center gap-1 pressable" aria-label="字幕">
+                      <ICaptions size={26} className={subDone && subMode !== "off" ? "hg-gold hg-ov-shadow" : "hg-ink hg-ov-shadow"} />
+                      <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">字幕</span>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1302,6 +1337,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           seekKey={playKey}
           nextDisabled={nextEp == null && index >= videoIds.length - 1}
           nextTitle={nextEp != null ? "下一集 E" : "下一部 ↓"}
+          subtitle={subs.supported && kind === "video" ? { on: subDone && subMode !== "off", busy: subs.status.state === "queued" || subs.status.state === "running" } : undefined}
+          onSubtitle={() => setSubOpen((v) => !v)}
           onToggle={() => videoRef.current?.toggle()}
           onSeek={(t, source) => { videoRef.current?.seek(t, source); setTime(t); }}
           onSeekInteraction={(phase, input, target, pointerTarget) => videoRef.current?.trace(`seek.input.${phase}`, { input, target, pointer_target: pointerTarget })}
@@ -1317,6 +1354,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
             else go(1);
           }}
         />
+      )}
+
+      {/* 字幕菜单 */}
+      {subOpen && subs.caps && (
+        <SubtitleMenu caps={subs.caps} status={subs.status} mode={subMode} translated={subs.translated} language={subs.language || subs.status.language || ""}
+          count={subs.cues.length || subs.status.count || 0} desktop={isDesktop}
+          onMode={setSubMode} onStart={(lang, force) => subs.start(lang, force)} onCancel={subs.cancel} onRemove={async () => { await subs.remove(); }}
+          onClose={() => setSubOpen(false)} />
       )}
 
       {/* 移动端：倍速状态 / 锁定提示 */}

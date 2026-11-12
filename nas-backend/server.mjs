@@ -15,6 +15,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createSubtitles } from "./subtitles.mjs";
 
 const execFileP = promisify(execFile);
 const argv = process.argv.slice(2);
@@ -22,6 +23,8 @@ const opt = (name, def) => { const i = argv.indexOf(`--${name}`); return i >= 0 
 const MEDIA_DIR = path.resolve(argv.find((a, i) => !a.startsWith("--") && !(argv[i - 1] || "").startsWith("--")) || process.env.MEDIA_DIR || "./media");
 const PORT = Number(opt("port", process.env.PORT || 8080));
 const CACHE_DIR = path.resolve(opt("cache", process.env.CACHE_DIR || path.join(path.dirname(new URL(import.meta.url).pathname), "cache")));
+// 字幕组件（whisper 模型 / 翻译模型 / Python 环境）所在目录，由 setup-subtitles.sh 安装
+const MODELS_DIR = path.resolve(opt("models-dir", process.env.MODELS_DIR || path.join(CACHE_DIR, "models")));
 const CACHE_MAX_BYTES = Number(opt("cache-max-gb", process.env.CACHE_MAX_GB || 20)) * 1024 ** 3;
 const HLS_TIME = 6; // 转码时的分片秒数；拷贝流时由源文件关键帧间隔决定
 const VIDEO_EXT = new Set([".mp4", ".mkv", ".mov", ".avi", ".ts", ".m4v", ".webm", ".flv", ".wmv", ".rmvb"]);
@@ -278,6 +281,15 @@ async function prewarm() {
   }
 }
 
+/* ───────────── 字幕（本地语音识别 + 翻译） ───────────── */
+
+const subs = createSubtitles({
+  cacheDir: CACHE_DIR,
+  modelsDir: MODELS_DIR,
+  fileOf: (id, ep) => LIBRARY.byId.get(id)?.files[ep - 1] || null,
+  durationOf: (file) => probe(file).then((i) => i.duration),
+});
+
 /* ───────────── 数据映射 ───────────── */
 
 const ok = (data) => ({ status: 1, data });
@@ -391,6 +403,10 @@ function sendFile(req, res, file, ctype, extra = {}) {
   stream.pipe(res);
 }
 
+function sendJson(res, obj, code = 200) {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(obj));
+}
+
 const server = http.createServer(async (req, res) => {
   const base = `http://${req.headers.host}`;
   const url = new URL(req.url, base);
@@ -434,6 +450,19 @@ const server = http.createServer(async (req, res) => {
       const isList = m[3].endsWith(".m3u8");
       return sendFile(req, res, file, isList ? "application/vnd.apple.mpegurl" : "video/mp2t", { "Cache-Control": isList ? "no-store" : "public, max-age=86400, immutable" });
     }
+    // 字幕接口：全是 GET + JSON，客户端经本地代理 /seg 访问
+    if (url.pathname === "/sub/capabilities") return sendJson(res, subs.capabilities());
+    if ((m = url.pathname.match(/^\/sub\/(\d+)\/(\d+)\/(status|start|cancel|remove|cues\.json)$/))) {
+      const id = +m[1], ep = +m[2];
+      if (!LIBRARY.byId.get(id)) return sendJson(res, { state: "error", message: "影片不存在" }, 404);
+      switch (m[3]) {
+        case "status": return sendJson(res, subs.status(id, ep));
+        case "start": return sendJson(res, subs.start(id, ep, { lang: url.searchParams.get("lang") || "auto", force: url.searchParams.get("force") === "1" }));
+        case "cancel": return sendJson(res, subs.cancel(id, ep));
+        case "remove": return sendJson(res, subs.remove(id, ep));
+        default: { const doc = subs.cues(id, ep); return doc ? sendJson(res, doc) : sendJson(res, { state: "idle" }, 404); }
+      }
+    }
     if (url.pathname === "/" || url.pathname === "/health") return void res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end(`HGhubX NAS backend: ${LIBRARY.list.length} videos, ${LIBRARY.categories.length} categories\n`);
     res.writeHead(404).end("not found");
   } catch (e) {
@@ -448,7 +477,7 @@ server.headersTimeout = 125_000;
 server.requestTimeout = 0;
 
 // 退出时带走所有 ffmpeg 子进程（被 SIGSTOP 暂停的也要杀掉，否则会变成孤儿进程一直占着文件）
-const killJobs = () => { for (const j of hlsJobs.values()) try { j.proc?.kill("SIGKILL"); } catch {} };
+const killJobs = () => { subs.shutdown(); for (const j of hlsJobs.values()) try { j.proc?.kill("SIGKILL"); } catch {} };
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => { killJobs(); process.exit(0); });
 process.on("exit", killJobs);
 

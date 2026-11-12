@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTime } from "../api";
 import { useSeekInput } from "./diagnostics";
-import { ICheck, ICompress, IExpand, ILockF, INext, IPauseF, IPip, IPlayF, ITheater, IVol, IVolMute } from "../icons";
+import { ICheck, ICompress, IExpand, ILockF, INext, IPauseF, IPip, IPlayF, ICaptions, ITheater, IVol, IVolMute } from "../icons";
 
 type Props = {
   paused: boolean;
@@ -18,6 +18,9 @@ type Props = {
   seekKey?: string;
   nextDisabled?: boolean;
   nextTitle?: string;
+  /** 字幕入口：后端支持字幕时才显示；on = 正在显示字幕，busy = 正在生成 */
+  subtitle?: { on: boolean; busy: boolean };
+  onSubtitle?: () => void;
   onToggle: () => void;
   onSeek: (t: number, source?: string) => void;
   onSeekInteraction?: (phase: string, input: string, target: number, pointerTarget?: number) => void;
@@ -35,7 +38,7 @@ const clock = (s: number) => fmtTime(Math.max(0, s || 0)).padStart(5, "0");
 
 export default function PlayerControls({
   paused, time, duration, buffered = 0, rate, muted, volume, theater = false, fullscreen = false,
-  visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext,
+  visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", subtitle, onSubtitle, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext,
 }: Props) {
   const [speedOpen, setSpeedOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -72,6 +75,11 @@ export default function PlayerControls({
         )}
         <span className="player-timecode"><span>{clock(seek.time)}</span><span className="player-time-separator">/</span>{clock(duration)}</span>
         <div className="player-control-spacer" />
+        {subtitle && onSubtitle && (
+          <button className={`player-control ${subtitle.on || subtitle.busy ? "is-on" : ""}`} aria-label="字幕" data-tooltip={subtitle.busy ? "字幕生成中" : "字幕 V"} onClick={onSubtitle}>
+            <ICaptions size={19} strokeWidth={1.7} />
+          </button>
+        )}
         <div className="player-speed-slot">
           <button className={`player-control player-speed ${rate !== 1 ? "is-on" : ""}`} aria-label="倍速" aria-expanded={speedOpen}
             data-tooltip="播放速度" onClick={() => setSpeedOpen((v) => !v)}>

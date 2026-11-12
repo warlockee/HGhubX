@@ -21,7 +21,9 @@
     "android:dev": "tauri android dev",
     "android:build": "tauri android build",
     "test:gestures": "node scripts/test-gestures.mjs",
-    "test:feed-controls": "node scripts/test-feed-controls.mjs"
+    "test:feed-controls": "node scripts/test-feed-controls.mjs",
+    "test:subtitles": "node scripts/test-subtitles.mjs",
+    "test:feed-subtitles": "node scripts/test-feed-subtitles.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

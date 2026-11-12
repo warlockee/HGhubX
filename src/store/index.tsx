@@ -3,6 +3,7 @@ import { api, platform as envPlatform } from "../api";
 import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity, setSiteBase } from "../html";
 import { appDataKey } from "../branding";
 import type { BootInfo, GateState, NasStatus, User } from "../types";
+import type { SubMode } from "../subtitles";
 
 export type Platform = "android" | "ios" | "windows" | "macos" | "linux";
 export type Theme = "dark" | "light";
@@ -72,13 +73,15 @@ type Persist = {
   swipeEp: boolean;
   /** 优先高清：有 HEVC 就用 HEVC，播不了自动回退标准 */
   preferHevc: boolean;
+  /** 字幕显示：关 / 中文 / 原文 / 双语（有字幕的视频才生效） */
+  subMode: SubMode;
 };
 
 const LS = appDataKey("default");
 const LEGACY_LS = "hghubx_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false,
+  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false, subMode: "both",
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -156,6 +159,7 @@ type Store = {
   muted: boolean; setMuted: (v: boolean | ((p: boolean) => boolean)) => void;
   muteOnStartup: boolean; setMuteOnStartup: (on: boolean) => void;
   swipeEp: boolean; setSwipeEp: (on: boolean) => void;
+  subMode: SubMode; setSubMode: (m: SubMode) => void;
   preferHevc: boolean; setPreferHevc: (on: boolean) => void;
   volume: number; setVolume: (v: number) => void;
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
@@ -424,6 +428,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setSwipeEp = useCallback((on: boolean) => {
     setP((s) => ({ ...s, swipeEp: on }));
   }, []);
+  const setSubMode = useCallback((m: SubMode) => {
+    setP((s) => ({ ...s, subMode: m }));
+  }, []);
   const setPreferHevc = useCallback((on: boolean) => {
     setP((s) => ({ ...s, preferHevc: on }));
   }, []);
@@ -444,6 +451,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs, clean, setClean,
     muteOnStartup: p.muteOnStartup, setMuteOnStartup,
     swipeEp: p.swipeEp, setSwipeEp,
+    subMode: p.subMode, setSubMode,
     preferHevc: p.preferHevc, setPreferHevc,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
@@ -452,7 +460,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     nas, nasLoaded, configureNas, restartNas,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    setMuted, setMuteOnStartup, setSwipeEp, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
+    setMuted, setMuteOnStartup, setSwipeEp, setSubMode, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, lineEpoch, theater, setTheater, fs, setFs, clean, setClean,
     gate, gateReady, gateBusy, gateError, activateGate, resetGate, nas, nasLoaded, configureNas, restartNas]);
 
