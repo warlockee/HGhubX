@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 // HGhubX NAS 后端：把本地影片目录包装成 HGhubX 的 edge_v1 接口。零依赖，Node >= 18，需要 ffmpeg/ffprobe。
 //
-// 用法：  node server.mjs /path/to/media [--port 8080] [--cache ./cache]
-// 目录约定：
-//   <媒体目录>/剧名/01.mp4 02.mp4 …   一个子文件夹 = 一部剧，里面的视频按文件名自然排序 = 各集
-//   <媒体目录>/某电影.mkv              散放的视频文件 = 单集影片
-//   封面：剧文件夹里放 cover/poster/folder.(jpg|png|webp)，电影放同名 .jpg；没有则用 ffmpeg 截一帧
-//   可选 meta.json（剧文件夹内）：{"title","description","tags":[],"score":9.1}
+// 用法：  node server.mjs /path/to/media [--port 8080] [--cache ./cache] [--cache-max-gb 20]
+// 目录约定（按 NAS 内容自动分类）：
+//   <媒体目录>/<分类>/…/xxx.mp4   每个视频文件是一个条目；顶层文件夹名 = 分类，更深的子文件夹名 = 额外标签
+//   <媒体目录>/xxx.mp4            散放在根目录的视频归入「其他」
+//   封面：与视频同名的 .jpg/.png/.webp；没有则用 ffmpeg 截一帧（后台预生成，缓存到磁盘）
 // 客户端「接入地址」填 http://<NAS-IP>:8080
 
 import http from "node:http";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, execFile } from "node:child_process";
@@ -22,137 +22,252 @@ const opt = (name, def) => { const i = argv.indexOf(`--${name}`); return i >= 0 
 const MEDIA_DIR = path.resolve(argv.find((a, i) => !a.startsWith("--") && !(argv[i - 1] || "").startsWith("--")) || process.env.MEDIA_DIR || "./media");
 const PORT = Number(opt("port", process.env.PORT || 8080));
 const CACHE_DIR = path.resolve(opt("cache", process.env.CACHE_DIR || path.join(path.dirname(new URL(import.meta.url).pathname), "cache")));
-const HLS_TIME = 6; // 分片秒数；客户端分片缓存上限 4MB，码率很高的片源可调小
+const CACHE_MAX_BYTES = Number(opt("cache-max-gb", process.env.CACHE_MAX_GB || 20)) * 1024 ** 3;
+const HLS_TIME = 6; // 转码时的分片秒数；拷贝流时由源文件关键帧间隔决定
 const VIDEO_EXT = new Set([".mp4", ".mkv", ".mov", ".avi", ".ts", ".m4v", ".webm", ".flv", ".wmv", ".rmvb"]);
 const IMAGE_EXT = [".jpg", ".jpeg", ".png", ".webp"];
+const OTHER = "其他";
 
 fs.mkdirSync(path.join(CACHE_DIR, "hls"), { recursive: true });
 fs.mkdirSync(path.join(CACHE_DIR, "covers"), { recursive: true });
 
-/* ───────────── 媒体库扫描 ───────────── */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 简单信号量：限制对网络盘的并发读 */
+const sem = (max) => {
+  let running = 0; const q = [];
+  return {
+    get busy() { return running > 0 || q.length > 0; },
+    async run(fn) {
+      if (running >= max) await new Promise((r) => q.push(r));
+      else running++;
+      try { return await fn(); } finally { const n = q.shift(); if (n) n(); else running--; }
+    },
+  };
+};
+const coverSem = sem(3);   // 截封面
+const probeSem = sem(4);   // ffprobe
+
+/* ───────────── 媒体库扫描（异步，不阻塞请求） ───────────── */
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const stableId = (rel) => crypto.createHash("sha1").update(rel).digest().readUInt32BE(0) % 2_000_000_000 + 1;
+const FILE_STAT = new Map(); // file -> { size, mtimeMs }
 
-const isVideo = (f) => VIDEO_EXT.has(path.extname(f).toLowerCase());
-function listVideos(dir) {
-  const out = [];
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+async function walk(dir, rel, out) {
+  let entries;
+  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) { console.warn("skip", dir, e.message); return; }
+  const names = new Set(entries.map((e) => e.name));
+  const jobs = [];
+  for (const e of entries) {
     if (e.name.startsWith(".")) continue;
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) out.push(...listVideos(p));
-    else if (e.isFile() && isVideo(e.name)) out.push(p);
-  }
-  return out.sort((a, b) => collator.compare(path.relative(dir, a), path.relative(dir, b)));
-}
-function findCover(dir, stem) {
-  for (const name of stem ? [stem] : ["cover", "poster", "folder"])
-    for (const ext of IMAGE_EXT) { const p = path.join(dir, name + ext); if (fs.existsSync(p)) return p; }
-  return null;
-}
-
-let LIBRARY = { list: [], byId: new Map() };
-function scan() {
-  const list = [];
-  const used = new Set();
-  const newId = (rel) => { let id = stableId(rel); while (used.has(id)) id++; used.add(id); return id; };
-  for (const e of fs.readdirSync(MEDIA_DIR, { withFileTypes: true })) {
-    if (e.name.startsWith(".")) continue;
-    const p = path.join(MEDIA_DIR, e.name);
-    let item = null;
-    try {
-      if (e.isDirectory()) {
-        const files = listVideos(p);
-        if (!files.length) continue;
-        let meta = {};
-        try { meta = JSON.parse(fs.readFileSync(path.join(p, "meta.json"), "utf8")); } catch {}
-        item = {
-          title: meta.title || e.name, description: meta.description || "", tags: meta.tags || ["剧集"], score: meta.score || 0,
-          files, coverFile: findCover(p), mtime: Math.max(...files.map((f) => fs.statSync(f).mtimeMs)),
-        };
-      } else if (e.isFile() && isVideo(e.name)) {
+    if (e.isDirectory()) jobs.push(walk(p, [...rel, e.name], out));
+    else if (e.isFile() && VIDEO_EXT.has(path.extname(e.name).toLowerCase())) {
+      jobs.push((async () => {
+        const st = await fsp.stat(p).catch(() => null);
+        if (!st) return;
         const stem = path.basename(e.name, path.extname(e.name));
-        item = { title: stem, description: "", tags: ["电影"], score: 0, files: [p], coverFile: findCover(MEDIA_DIR, stem), mtime: fs.statSync(p).mtimeMs };
-      }
-    } catch (err) { console.warn("skip", p, err.message); }
-    if (item) { item.id = newId(e.name); list.push(item); }
+        const side = IMAGE_EXT.map((x) => stem + x).find((n) => names.has(n));
+        FILE_STAT.set(p, { size: st.size, mtimeMs: st.mtimeMs });
+        out.push({
+          id: stableId([...rel, e.name].join("/")), title: stem, files: [p], mtime: st.mtimeMs,
+          category: rel[0] || OTHER, tags: [rel[0] || OTHER, ...rel.slice(1)], score: 0, description: "",
+          coverFile: side ? path.join(dir, side) : null,
+        });
+      })());
+    }
+    // 每批并发有限，避免对 AFP 一次发起上千个 stat
+    if (jobs.length >= 16) await Promise.all(jobs.splice(0));
   }
-  list.sort((a, b) => b.mtime - a.mtime);
-  LIBRARY = { list, byId: new Map(list.map((v) => [v.id, v])) };
-  console.log(`[scan] ${list.length} 部影片 @ ${MEDIA_DIR}`);
+  await Promise.all(jobs);
 }
 
-/* ───────────── ffprobe / 封面 / HLS ───────────── */
-
-const probeCache = new Map();
-async function probe(file) {
-  if (probeCache.has(file)) return probeCache.get(file);
-  const { stdout } = await execFileP("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], { maxBuffer: 16e6 });
-  const j = JSON.parse(stdout);
-  const v = j.streams.find((s) => s.codec_type === "video");
-  const a = j.streams.find((s) => s.codec_type === "audio");
-  const r = { duration: Math.round(Number(j.format.duration) || 0), vcodec: v?.codec_name, acodec: a?.codec_name, pixfmt: v?.pix_fmt };
-  probeCache.set(file, r);
-  return r;
+let LIBRARY = { list: [], byId: new Map(), categories: [] };
+let scanning = false;
+async function scan() {
+  if (scanning) return;
+  scanning = true;
+  const t0 = Date.now();
+  try {
+    const found = [];
+    await walk(MEDIA_DIR, [], found);
+    const used = new Set();
+    found.sort((a, b) => b.mtime - a.mtime || collator.compare(a.title, b.title));
+    for (const v of found) { while (used.has(v.id)) v.id++; used.add(v.id); }
+    const cats = new Map();
+    for (const v of found) { const c = cats.get(v.category) || { name: v.category, count: 0, latest: 0 }; c.count++; c.latest = Math.max(c.latest, v.mtime); cats.set(v.category, c); }
+    LIBRARY = { list: found, byId: new Map(found.map((v) => [v.id, v])), categories: [...cats.values()].sort((a, b) => b.latest - a.latest) };
+    console.log(`[scan] ${found.length} 个视频 / ${cats.size} 个分类 @ ${MEDIA_DIR} (${Date.now() - t0}ms)`);
+  } finally { scanning = false; }
 }
+
+/* ───────────── ffprobe（结果持久化到磁盘，重启后不用再读网络盘） ───────────── */
+
+const PROBE_FILE = path.join(CACHE_DIR, "probe.json");
+let PROBES = {};
+try { PROBES = JSON.parse(fs.readFileSync(PROBE_FILE, "utf8")); } catch {}
+let probeDirty = false;
+setInterval(() => { if (probeDirty) { probeDirty = false; fsp.writeFile(PROBE_FILE + ".tmp", JSON.stringify(PROBES)).then(() => fsp.rename(PROBE_FILE + ".tmp", PROBE_FILE)).catch(() => {}); } }, 15_000).unref();
+
+const probeKey = (file) => { const s = FILE_STAT.get(file); return s ? `${file}|${s.size}|${Math.round(s.mtimeMs)}` : file; };
+const cachedProbe = (file) => PROBES[probeKey(file)];
+const probeJobs = new Map();
+function probe(file) {
+  const hit = cachedProbe(file);
+  if (hit) return Promise.resolve(hit);
+  if (!probeJobs.has(file)) {
+    probeJobs.set(file, probeSem.run(async () => {
+      const { stdout } = await execFileP("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], { maxBuffer: 16e6 });
+      const j = JSON.parse(stdout);
+      const v = j.streams.find((s) => s.codec_type === "video");
+      const a = j.streams.find((s) => s.codec_type === "audio");
+      const r = { duration: Math.round(Number(j.format.duration) || 0), vcodec: v?.codec_name, acodec: a?.codec_name, pixfmt: v?.pix_fmt };
+      PROBES[probeKey(file)] = r; probeDirty = true;
+      return r;
+    }).finally(() => probeJobs.delete(file)));
+  }
+  return probeJobs.get(file);
+}
+
+/* ───────────── 封面 ───────────── */
 
 const coverJobs = new Map();
-async function coverPath(video) {
-  if (video.coverFile) return video.coverFile;
+function coverPath(video) {
+  if (video.coverFile) return Promise.resolve(video.coverFile);
   const out = path.join(CACHE_DIR, "covers", `${video.id}.jpg`);
-  if (fs.existsSync(out)) return out;
+  if (fs.existsSync(out)) return Promise.resolve(out);
   if (!coverJobs.has(video.id)) {
-    coverJobs.set(video.id, (async () => {
-      const file = video.files[0];
-      const dur = (await probe(file).catch(() => ({ duration: 0 }))).duration;
-      const at = Math.min(Math.max(dur * 0.1, 1), 120);
-      await execFileP("ffmpeg", ["-y", "-v", "error", "-ss", String(at), "-i", file, "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", out + ".tmp.jpg"]);
-      fs.renameSync(out + ".tmp.jpg", out);
-    })().finally(() => coverJobs.delete(video.id)));
+    coverJobs.set(video.id, coverSem.run(async () => {
+      const grab = (ss) => execFileP("ffmpeg", ["-y", "-v", "error", "-ss", String(ss), "-i", video.files[0], "-frames:v", "1", "-vf", "scale=360:-2", "-q:v", "5", out + ".tmp.jpg"]);
+      try { await grab(8); } catch {}
+      if (!fs.existsSync(out + ".tmp.jpg")) await grab(0); // 视频短于 8 秒
+      await fsp.rename(out + ".tmp.jpg", out);
+      return out;
+    }).finally(() => coverJobs.delete(video.id)));
   }
-  await coverJobs.get(video.id);
-  return out;
+  return coverJobs.get(video.id);
 }
 
-const hlsJobs = new Map();
-function runFfmpeg(args) {
+/* ───────────── HLS ───────────── */
+
+/* 网络盘（AFP）读取速度是瓶颈（实测约 16MB/s）。策略：
+ *  - 新的播放请求立刻启动 ffmpeg，不排队；
+ *  - 只让「最近被请求的 ACTIVE 个」任务继续跑，更早的任务 SIGSTOP 暂停（不丢进度），腾出带宽给正在看的片子；
+ *  - 任务结束或被再次请求时自动恢复。 */
+const hlsJobs = new Map(); // key -> { promise, lastUsed, proc, paused, pausedAt }
+const ACTIVE = 3;
+function rebalance() {
+  const list = [...hlsJobs.values()].sort((a, b) => b.lastUsed - a.lastUsed);
+  // 前台优先：最近被请求、还没切出起播段数的任务独占带宽，其余全部暂停；它开播后再恢复最近的 ACTIVE 个
+  const fg = list.find((j) => j.foreground);
+  list.forEach((j, i) => {
+    if (!j.proc) return;
+    const run = fg ? j === fg : i < ACTIVE;
+    try {
+      if (run && j.paused) { j.proc.kill("SIGCONT"); j.paused = false; }
+      else if (!run && !j.paused) { j.proc.kill("SIGSTOP"); j.paused = true; j.pausedAt = Date.now(); }
+    } catch {}
+  });
+}
+setInterval(() => { // 暂停超过 15 分钟的任务视为被放弃，清理掉
+  for (const j of hlsJobs.values()) if (j.paused && Date.now() - j.pausedAt > 15 * 60_000) { try { j.proc.kill("SIGKILL"); } catch {} }
+}, 60_000).unref();
+
+function runFfmpeg(args, job) {
   return new Promise((resolve, reject) => {
     const p = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    job.proc = p;
+    rebalance();
     let err = "";
     p.stderr.on("data", (d) => { err = (err + d).slice(-2000); });
     p.on("error", reject);
     p.on("close", (c) => (c === 0 ? resolve() : reject(new Error(`ffmpeg 退出码 ${c}: ${err}`))));
   });
 }
-/** 第一次播放时把整集封装成 HLS（H.264+AAC 直接拷贝流，不重编码；其它编码才转码），结果缓存在磁盘。 */
-async function ensureHls(video, ep) {
+const readList = (m3u8) => { try { return fs.readFileSync(m3u8, "utf8"); } catch { return ""; } };
+const isComplete = (m3u8) => readList(m3u8).includes("#EXT-X-ENDLIST");
+const segCount = (m3u8) => (readList(m3u8).match(/^seg_\d+\.ts$/gm) || []).length;
+const START_SEGMENTS = 3;            // 切出这么多段就先开播（边切边播；hls.js 直播起播需要约 3 段）
+const SMALL_FILE = 48 * 1024 * 1024; // 小文件几秒内就能切完，值得多等一下直接给完整 VOD（可随意拖动）
+
+/** 后台把一集封装成 HLS：H.264+AAC 直接拷贝流（不重编码），其它编码才转码。缓存在磁盘。 */
+async function ensureHls(video, ep = 1) {
   const dir = path.join(CACHE_DIR, "hls", String(video.id), String(ep));
   const m3u8 = path.join(dir, "index.m3u8");
-  if (fs.existsSync(m3u8)) return m3u8;
   const key = `${video.id}/${ep}`;
-  if (!hlsJobs.has(key)) {
-    hlsJobs.set(key, (async () => {
+  let job = hlsJobs.get(key);
+  if (job) { job.lastUsed = Date.now(); if (segCount(m3u8) < START_SEGMENTS) job.foreground = true; rebalance(); }
+  else {
+    if (isComplete(m3u8)) { fsp.utimes(dir, new Date(), new Date()).catch(() => {}); return; }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir, { recursive: true });
+    job = { lastUsed: Date.now(), proc: null, paused: false, foreground: true };
+    rebalance();
+    hlsJobs.set(key, job);
+    job.promise = (async () => {
       const file = video.files[ep - 1];
       const info = await probe(file);
       const copyV = info.vcodec === "h264" && (!info.pixfmt || info.pixfmt === "yuv420p");
       const copyA = !info.acodec || info.acodec === "aac";
-      const tmp = dir + ".tmp";
-      fs.rmSync(tmp, { recursive: true, force: true });
-      fs.mkdirSync(tmp, { recursive: true });
-      console.log(`[hls] ${video.title} 第${ep}集 video=${copyV ? "copy" : "x264"} audio=${copyA ? "copy" : "aac"}`);
+      console.log(`[hls] ${video.category}/${video.title} video=${copyV ? "copy" : "x264"} audio=${copyA ? "copy" : "aac"}`);
       await runFfmpeg([
-        "-y", "-v", "error", "-i", file, "-map", "0:v:0", "-map", "0:a:0?", "-sn",
+        "-y", "-v", "error", "-fflags", "+genpts", "-i", file, "-map", "0:v:0", "-map", "0:a:0?", "-sn",
         ...(copyV ? ["-c:v", "copy"] : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-force_key_frames", `expr:gte(t,n_forced*${HLS_TIME})`]),
         ...(copyA ? ["-c:a", "copy"] : ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]),
-        "-f", "hls", "-hls_time", String(HLS_TIME), "-hls_playlist_type", "vod", "-hls_segment_type", "mpegts",
-        "-hls_segment_filename", path.join(tmp, "seg_%05d.ts"), path.join(tmp, "index.m3u8"),
-      ]);
-      fs.rmSync(dir, { recursive: true, force: true });
-      fs.renameSync(tmp, dir);
-    })().finally(() => hlsJobs.delete(key)));
+        "-f", "hls", "-hls_time", String(HLS_TIME), "-hls_playlist_type", "event", "-hls_flags", "temp_file",
+        "-hls_segment_type", "mpegts", "-hls_segment_filename", path.join(dir, "seg_%05d.ts"), m3u8,
+      ], job);
+    })();
+    job.promise.then(() => evictSoon(), (e) => { console.error(`[hls] ${key} 失败:`, e.message); fs.rmSync(dir, { recursive: true, force: true }); })
+      .finally(() => { hlsJobs.delete(key); rebalance(); });
   }
-  await hlsJobs.get(key);
-  return m3u8;
+  let finished = false;
+  job.promise.then(() => { finished = true; }, () => { finished = true; });
+  const small = (FILE_STAT.get(video.files[ep - 1])?.size || Infinity) <= SMALL_FILE;
+  const t0 = Date.now();
+  for (; !finished && Date.now() - t0 < 120_000; await sleep(80)) {
+    if (segCount(m3u8) >= START_SEGMENTS && (!small || Date.now() - t0 > 4000)) break;
+  }
+  if (job.foreground) { job.foreground = false; rebalance(); }
+  if (!fs.existsSync(m3u8)) throw new Error("生成播放列表失败或超时");
+}
+
+/** HLS 缓存超过上限时，按最近使用时间淘汰最旧的（正在生成的不动） */
+let evictTimer = null;
+function evictSoon() { if (!evictTimer) evictTimer = setTimeout(() => { evictTimer = null; evict().catch(() => {}); }, 30_000); }
+async function dirSize(d) { let n = 0; for (const e of await fsp.readdir(d, { withFileTypes: true })) { const p = path.join(d, e.name); n += e.isDirectory() ? await dirSize(p) : (await fsp.stat(p)).size; } return n; }
+async function evict() {
+  const root = path.join(CACHE_DIR, "hls");
+  const eps = [];
+  for (const id of await fsp.readdir(root)) for (const ep of await fsp.readdir(path.join(root, id)).catch(() => [])) {
+    const d = path.join(root, id, ep);
+    const st = await fsp.stat(d).catch(() => null);
+    if (st?.isDirectory()) eps.push({ d, key: `${id}/${ep}`, t: st.mtimeMs, size: await dirSize(d).catch(() => 0) });
+  }
+  let total = eps.reduce((s, e) => s + e.size, 0);
+  for (const e of eps.sort((a, b) => a.t - b.t)) {
+    if (total <= CACHE_MAX_BYTES) break;
+    if (hlsJobs.has(e.key)) continue;
+    await fsp.rm(e.d, { recursive: true, force: true });
+    total -= e.size;
+    console.log(`[cache] 淘汰 ${e.key}，剩余 ${(total / 1024 ** 3).toFixed(1)}GB`);
+  }
+}
+
+/** 空闲时后台预生成时长与封面，让列表页和详情页都是命中缓存的瞬时响应 */
+async function prewarm() {
+  for (;;) {
+    let did = false;
+    for (const v of LIBRARY.list) {
+      if (hlsJobs.size > 0 || coverSem.busy) { await sleep(2000); continue; } // 用户在播放 / 在刷列表时让路
+      const f = v.files[0];
+      try {
+        if (!cachedProbe(f)) { await probe(f); did = true; await sleep(100); }
+        if (!v.coverFile && !fs.existsSync(path.join(CACHE_DIR, "covers", `${v.id}.jpg`))) { await coverPath(v); did = true; await sleep(100); }
+      } catch (e) { /* 坏文件跳过 */ }
+    }
+    await sleep(did ? 5_000 : 60_000);
+  }
 }
 
 /* ───────────── 数据映射 ───────────── */
@@ -164,11 +279,12 @@ const USER = { id: 1, username: "nas", nickname: "NAS", avatar: "", avatar_color
 const durText = (s) => (s > 0 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : "");
 
 function card(v, base) {
+  const info = cachedProbe(v.files[0]);
   return {
     id: v.id, title: v.title, cover: `${base}/media/cover/${v.id}.jpg`, description: v.description, tags: v.tags,
-    score: v.score, episode_count: v.files.length, total_episodes: v.files.length, hot: 0, like_count: 0,
+    score: v.score, episode_count: 1, total_episodes: 1, duration: info ? durText(info.duration) : undefined, hot: 0, like_count: 0,
     collect_count: 0, comment_count: 0, is_finished: true, is_original: 0,
-    created_at: new Date(v.mtime).toISOString(), new_at: Math.floor(v.mtime / 1000), author: AUTHOR,
+    created_at: new Date(v.mtime).toISOString(), new_at: Math.floor(v.mtime / 1000), author: { ...AUTHOR, name: v.category },
   };
 }
 function paged(items, q, base) {
@@ -179,15 +295,8 @@ function paged(items, q, base) {
 const emptyPage = (q) => ({ items: [], pagination: { page: Number(q.get("page")) || 1, size: Number(q.get("size")) || 20, total: 0, pages: 0 } });
 
 async function detail(v, base) {
-  // 集数多时不逐个 ffprobe（网络盘上很慢）；时长在播放接口里再给
-  const probeAll = v.files.length <= 20;
-  const eps = [];
-  for (let i = 0; i < v.files.length; i++) {
-    const info = probeAll ? await probe(v.files[i]).catch(() => ({ duration: 0 })) : probeCache.get(v.files[i]) || { duration: 0 };
-    const name = path.basename(v.files[i], path.extname(v.files[i]));
-    eps.push({ ep_num: i + 1, title: v.files.length === 1 ? v.title : name, duration: info.duration, status: 1 });
-  }
-  return { video: { ...card(v, base), episodes: eps, counts: { collect: 0, comment: 0, hot: 0, like: 0 }, author: AUTHOR, interaction: { collected: false, liked: false }, duration: eps.reduce((s, e) => s + e.duration, 0) } };
+  const info = await probe(v.files[0]).catch(() => ({ duration: 0 }));
+  return { video: { ...card(v, base), episodes: [{ ep_num: 1, title: v.title, duration: info.duration, status: 1 }], counts: { collect: 0, comment: 0, hot: 0, like: 0 }, interaction: { collected: false, liked: false }, duration: info.duration } };
 }
 
 /* ───────────── 路由（edge 信封里的 method + path） ───────────── */
@@ -204,21 +313,23 @@ async function route(method, rawPath, body, base) {
   if (p === "/api/account/me") return ok(USER);
 
   if (p === "/api/videos") return ok(paged(all, q, base));
-  if ((m = p.match(/^\/api\/videos\/category\/(.+)$/))) { const c = decodeURIComponent(m[1]); return ok(paged(all.filter((v) => v.tags.includes(c)), q, base)); }
+  if ((m = p.match(/^\/api\/videos\/category\/(.+)$/))) { const c = decodeURIComponent(m[1]); return ok(paged(all.filter((v) => v.category === c || v.tags.includes(c)), q, base)); }
   if ((m = p.match(/^\/api\/videos\/tag\/(.+)$/))) { const t = decodeURIComponent(m[1]); return ok(paged(all.filter((v) => v.tags.includes(t)), q, base)); }
   if (p === "/api/videos/following") return ok(emptyPage(q));
-  if ((m = p.match(/^\/api\/videos\/user\/\d+$/))) return ok(paged(all, q, base));
-  if ((m = p.match(/^\/api\/videos\/(\d+)\/related$/))) return ok({ items: all.filter((v) => v.id !== +m[1]).slice(0, 12).map((v) => card(v, base)) });
-  if ((m = p.match(/^\/api\/videos\/(\d+)\/comments$/))) return ok({ ep: Number(q.get("ep")) || 1, items: [], pagination: { page: 1, size: 20, total: 0, pages: 0 } });
-  if ((m = p.match(/^\/api\/videos\/(\d+)\/(like|collect)$/))) return ok({ liked: method !== "DELETE", collected: method !== "DELETE" });
+  if (p.match(/^\/api\/videos\/user\/\d+$/)) return ok(paged(all, q, base));
+  if ((m = p.match(/^\/api\/videos\/(\d+)\/related$/))) {
+    const cur = LIBRARY.byId.get(+m[1]);
+    return ok({ items: all.filter((v) => v.id !== +m[1] && cur && v.category === cur.category).slice(0, 12).map((v) => card(v, base)) });
+  }
+  if (p.match(/^\/api\/videos\/(\d+)\/comments$/)) return ok({ ep: 1, items: [], pagination: { page: 1, size: 20, total: 0, pages: 0 } });
+  if (p.match(/^\/api\/videos\/(\d+)\/(like|collect)$/)) return ok({ liked: method !== "DELETE", collected: method !== "DELETE" });
 
-  // 播放：主接口 episodes/{ep}/playback；旧接口 /play?ep= 作为回退
   if ((m = p.match(/^\/api\/videos\/(\d+)\/episodes\/(\d+)\/playback$/)) || (m = p.match(/^\/api\/videos\/(\d+)\/play$/))) {
     const v = LIBRARY.byId.get(+m[1]);
     const ep = m[2] ? +m[2] : Number(q.get("ep")) || 1;
     if (!v || ep < 1 || ep > v.files.length) return fail("影片不存在");
     await ensureHls(v, ep);
-    const info = await probe(v.files[ep - 1]).catch(() => ({ duration: 0 }));
+    const info = cachedProbe(v.files[ep - 1]) || { duration: 0 };
     const url = `${base}/media/hls/${v.id}/${ep}/index.m3u8`;
     return ok({ id: v.id, ep_num: ep, duration: info.duration, title: v.title, video_url: url, streams: { main: url } });
   }
@@ -227,14 +338,15 @@ async function route(method, rawPath, body, base) {
   if (p === "/api/search") {
     if (q.get("type") === "post") return ok(emptyPage(q));
     const kw = (q.get("q") || "").toLowerCase();
-    return ok({ ...paged(all.filter((v) => v.title.toLowerCase().includes(kw)), q, base), keyword: q.get("q") || "" });
+    return ok({ ...paged(all.filter((v) => v.title.toLowerCase().includes(kw) || v.tags.some((t) => t.toLowerCase().includes(kw))), q, base), keyword: q.get("q") || "" });
   }
-  if (p === "/api/search/hot") return ok({ items: [] });
+  if (p === "/api/search/hot") return ok({ items: LIBRARY.categories.slice(0, 8).map((c) => ({ word: c.name, heat: c.count })) });
   if ((m = p.match(/^\/api\/ranks\/(\w+)$/)))
-    return ok({ type: m[1], items: all.slice(0, 20).map((v, i) => ({ rank: i + 1, video_id: v.id, title: v.title, cover: `${base}/media/cover/${v.id}.jpg`, tags: v.tags, score: v.score, episode_count: v.files.length, is_finished: true, metric_label: "", metric_value: 0, metrics: {} })) });
+    return ok({ type: m[1], items: all.slice(0, 20).map((v, i) => ({ rank: i + 1, video_id: v.id, title: v.title, cover: `${base}/media/cover/${v.id}.jpg`, tags: v.tags, score: v.score, cate_name: v.category, episode_count: 1, is_finished: true, metric_label: "", metric_value: 0, metrics: {} })) });
   if (p === "/api/tags") {
-    const tags = [...new Set(all.flatMap((v) => v.tags))];
-    return ok({ categories: [{ id: 1, code: "type", name: "分类", sort: 0, tags: tags.map((t, i) => ({ id: i + 1, name: t, slug: t })) }] });
+    // 分类 = 顶层文件夹；条目数放在 hot_score 里供客户端展示
+    const groups = [{ id: 1, code: "category", name: "分类", sort: 0, tags: LIBRARY.categories.map((c, i) => ({ id: i + 1, name: c.name, slug: c.name, hot_score: c.count, sort: i })) }];
+    return ok({ categories: groups });
   }
   if (p === "/api/topics") return ok({ items: [] });
   if (p.startsWith("/api/posts") || p === "/api/site/categories/post") return ok(p === "/api/site/categories/post" ? { items: [] } : emptyPage(q));
@@ -245,7 +357,7 @@ async function route(method, rawPath, body, base) {
 
 /* ───────────── HTTP ───────────── */
 
-function sendFile(req, res, file, ctype) {
+function sendFile(req, res, file, ctype, extra = {}) {
   let st;
   try { st = fs.statSync(file); } catch { res.writeHead(404).end("not found"); return; }
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || "");
@@ -258,7 +370,7 @@ function sendFile(req, res, file, ctype) {
     code = 206;
   }
   res.writeHead(code, {
-    "Content-Type": ctype, "Content-Length": end - start + 1, "Accept-Ranges": "bytes",
+    "Content-Type": ctype, "Content-Length": end - start + 1, "Accept-Ranges": "bytes", ...extra,
     ...(code === 206 && { "Content-Range": `bytes ${start}-${end}/${st.size}` }),
   });
   if (req.method === "HEAD") return res.end();
@@ -277,7 +389,8 @@ const server = http.createServer(async (req, res) => {
       if (env.body) try { body = JSON.parse(Buffer.from(env.body, "base64").toString()); } catch {}
       const t0 = Date.now();
       const out = await route((env.method || "GET").toUpperCase(), env.path || "/", body, base).catch((e) => { console.error(e); return fail(String(e.message || e)); });
-      console.log(`[api] ${env.method} ${env.path} -> ${out.status} ${Date.now() - t0}ms`);
+      const ms = Date.now() - t0;
+      if (ms > 500 || process.env.VERBOSE) console.log(`[api] ${env.method} ${env.path} -> ${out.status} ${ms}ms`);
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(out));
       return;
     }
@@ -287,13 +400,14 @@ const server = http.createServer(async (req, res) => {
       if (!v) return void res.writeHead(404).end();
       const f = await coverPath(v);
       const ext = path.extname(f).toLowerCase();
-      return sendFile(req, res, f, ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg");
+      return sendFile(req, res, f, ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg", { "Cache-Control": "public, max-age=86400" });
     }
     if ((m = url.pathname.match(/^\/media\/hls\/(\d+)\/(\d+)\/(index\.m3u8|seg_\d+\.ts)$/))) {
       const file = path.join(CACHE_DIR, "hls", m[1], m[2], m[3]);
-      return sendFile(req, res, file, m[3].endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp2t");
+      const isList = m[3].endsWith(".m3u8");
+      return sendFile(req, res, file, isList ? "application/vnd.apple.mpegurl" : "video/mp2t", { "Cache-Control": isList ? "no-store" : "public, max-age=86400, immutable" });
     }
-    if (url.pathname === "/" || url.pathname === "/health") return void res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end(`HGhubX NAS backend: ${LIBRARY.list.length} videos\n`);
+    if (url.pathname === "/" || url.pathname === "/health") return void res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }).end(`HGhubX NAS backend: ${LIBRARY.list.length} videos, ${LIBRARY.categories.length} categories\n`);
     res.writeHead(404).end("not found");
   } catch (e) {
     console.error(e);
@@ -301,8 +415,18 @@ const server = http.createServer(async (req, res) => {
     res.end(String(e.message || e));
   }
 });
+// 客户端（reqwest）会复用空闲连接；Node 默认 5 秒就关闭空闲连接，会撞上「复用到刚被关的连接」而失败重试，表现为偶发卡顿
+server.keepAliveTimeout = 120_000;
+server.headersTimeout = 125_000;
+server.requestTimeout = 0;
 
-scan();
-fs.watch(MEDIA_DIR, { persistent: false }, () => { clearTimeout(scan.t); scan.t = setTimeout(scan, 2000); });
-setInterval(scan, 10 * 60 * 1000).unref();
+// 退出时带走所有 ffmpeg 子进程（被 SIGSTOP 暂停的也要杀掉，否则会变成孤儿进程一直占着文件）
+const killJobs = () => { for (const j of hlsJobs.values()) try { j.proc?.kill("SIGKILL"); } catch {} };
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => { killJobs(); process.exit(0); });
+process.on("exit", killJobs);
+
+await scan();
+setInterval(() => scan().catch(console.error), 30 * 60 * 1000).unref(); // 网络盘上不监听目录变化，只定时重扫
+evictSoon();
+prewarm().catch(console.error);
 server.listen(PORT, "0.0.0.0", () => console.log(`[http] 监听 0.0.0.0:${PORT}，客户端接入地址填 http://<本机IP>:${PORT}`));
