@@ -410,6 +410,30 @@ jobs:
           echo "versionName=$V  versionCode=$CODE"
 
       # Tauri 2 在 Linux 上依赖 webkit2gtk-4.1；22.04 的 jammy-updates 已提供
+      - name: Point apt at Tsinghua mirror
+        run: |
+          set -euo pipefail
+          # GitHub 22.04 runner 的实际源在 file: mirrorlist 里间接指向这里
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          # ubuntu-22.04: classic one-line sources.list
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/sources.list
+          fi
+          # ubuntu-24.04: deb822 .sources
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          grep -Rhn -E 'azure\.archive|archive\.ubuntu|security\.ubuntu|mirrors\.tuna' \
+            /etc/apt/sources.list /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ 2>/dev/null | head -20 || true
+
       - name: 安装系统依赖
         run: |
           sudo apt-get -o Acquire::Retries=3 update
@@ -465,6 +489,30 @@ jobs:
         run: |
           V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           node scripts/set-version.mjs "$V"
+
+      - name: Point apt at Tsinghua mirror
+        run: |
+          set -euo pipefail
+          # GitHub 22.04 runner 的实际源在 file: mirrorlist 里间接指向这里
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          # ubuntu-22.04: classic one-line sources.list
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/sources.list
+          fi
+          # ubuntu-24.04: deb822 .sources
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i -E \
+              -e 's#https?://(azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu/?#https://mirrors.tuna.tsinghua.edu.cn/ubuntu/#g' \
+              /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          grep -Rhn -E 'azure\.archive|archive\.ubuntu|security\.ubuntu|mirrors\.tuna' \
+            /etc/apt/sources.list /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ 2>/dev/null | head -20 || true
 
       - name: 安装系统依赖
         run: |
