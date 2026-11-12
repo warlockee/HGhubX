@@ -46,6 +46,9 @@
     "android": {
       "minSdkVersion": 24,
       "versionCode": 1003000
+    },
+    "resources": {
+      "../nas-backend/server.mjs": "nas-backend/server.mjs"
     }
   }
 }

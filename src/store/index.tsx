@@ -2,7 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api, platform as envPlatform } from "../api";
 import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity, setSiteBase } from "../html";
 import { appDataKey } from "../branding";
-import type { BootInfo, GateState, User } from "../types";
+import type { BootInfo, GateState, NasStatus, User } from "../types";
 
 export type Platform = "android" | "ios" | "windows" | "macos" | "linux";
 export type Theme = "dark" | "light";
@@ -167,7 +167,14 @@ type Store = {
   gate: GateState; gateReady: boolean; gateBusy: boolean; gateError: string;
   activateGate: (address: string) => Promise<void>;
   resetGate: () => Promise<void>;
+  /** 内置 NAS 服务（随应用启动的本机后端）：状态由 Rust 事件推送 */
+  nas: NasStatus; nasLoaded: boolean;
+  /** 启用 / 停用 / 改配置；启用后接入地址自动指向本机服务 */
+  configureNas: (enabled: boolean, mediaDir: string, port?: number) => Promise<void>;
+  restartNas: () => Promise<void>;
 };
+
+const NAS_OFF: NasStatus = { enabled: false, state: "off", message: "", port: 17680, media_dir: "", base: "", videos: null, categories: null, log: [] };
 
 const Ctx = createContext<Store>(null as unknown as Store);
 export const useStore = () => useContext(Ctx);
@@ -193,6 +200,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [gateReady, setGateReady] = useState(false);
   const [gateBusy, setGateBusy] = useState(false);
   const [gateError, setGateError] = useState("");
+  const [nas, setNas] = useState<NasStatus>(NAS_OFF);
+  const [nasLoaded, setNasLoaded] = useState(false);
   const toastSeq = useRef(0);
 
   useEffect(() => {
@@ -268,6 +277,50 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setStack([]);
     setTabRaw("home");
     setSiteBase("");
+  }, []);
+
+  /* 内置 NAS 服务状态：先读一次快照，再订阅 Rust 推送；启动中每秒兜底拉取，防止事件在订阅前就发完 */
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    api.nasStatus().then((r) => { if (alive) setNas(r); }).catch(() => {}).finally(() => { if (alive) setNasLoaded(true); });
+    api.onNasStatus((r) => { if (alive) setNas(r); }).then((fn) => { if (alive) unlisten = fn; else fn(); }).catch(() => {});
+    return () => { alive = false; unlisten?.(); };
+  }, []);
+  useEffect(() => {
+    if (nas.state !== "starting") return;
+    const t = window.setInterval(() => { api.nasStatus().then(setNas).catch(() => {}); }, 1000);
+    return () => window.clearInterval(t);
+  }, [nas.state]);
+  /* 从启动中变为就绪：弹一条提示（启动页消失本身也是反馈，这条补上规模信息） */
+  const prevNasState = useRef(nas.state);
+  useEffect(() => {
+    if (prevNasState.current === "starting" && nas.state === "ready") {
+      const id = ++toastSeq.current;
+      setToasts((t) => [...t.slice(-2), { id, msg: `NAS 服务已就绪 · ${nas.videos ?? 0} 个视频`, icon: "ok" }]);
+      window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2600);
+    }
+    prevNasState.current = nas.state;
+  }, [nas.state, nas.videos]);
+
+  const configureNas = useCallback(async (enabled: boolean, mediaDir: string, port?: number) => {
+    const wasLocal = gate.base === nas.base;
+    try {
+      const next = await api.nasConfigure(enabled, mediaDir, port);
+      setNas(next);
+      if (enabled) {
+        // 接入地址指向本机服务（重置会话与列表）；启动页会挡住业务请求直到服务就绪
+        await activateGate(next.base);
+      } else if (wasLocal) {
+        await resetGate(); // 服务已停用，原来的本机地址不再有效
+      }
+    } catch (e) {
+      throw new Error(typeof e === "string" ? e : (e as Error).message || "保存失败");
+    }
+  }, [gate.base, nas.base, activateGate, resetGate]);
+
+  const restartNas = useCallback(async () => {
+    setNas(await api.nasRestart());
   }, []);
 
   const setStrictSecurity = useCallback(async (on: boolean) => {
@@ -396,11 +449,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, lineEpoch,
     gate, gateReady, gateBusy, gateError, activateGate, resetGate,
+    nas, nasLoaded, configureNas, restartNas,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setMuteOnStartup, setSwipeEp, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, lineEpoch, theater, setTheater, fs, setFs, clean, setClean,
-    gate, gateReady, gateBusy, gateError, activateGate, resetGate]);
+    gate, gateReady, gateBusy, gateError, activateGate, resetGate, nas, nasLoaded, configureNas, restartNas]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

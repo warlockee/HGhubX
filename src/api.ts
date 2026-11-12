@@ -2,8 +2,8 @@ import { tracePlayback } from "./player/diagnostics";
 import { dataCall, type DataCommand } from "./data/client";
 import { commands } from "./data/commands";
 import {
-  checkUpdate, clearCache, gateOpen, gateReset, gateState, logLine, netDiag, openUrl, securitySet,
-  setOrientation,
+  checkUpdate, clearCache, gateOpen, gateReset, gateState, logLine, nasConfigure, nasRestart, nasStatus, netDiag,
+  onNasStatus, openUrl, securitySet, setOrientation,
 } from "./platform";
 import type {
   BootInfo, CommentPage, Detail, HotWord, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
@@ -124,6 +124,10 @@ export const api = {
   gateState,
   gateOpen,
   gateReset,
+  nasStatus,
+  nasConfigure,
+  nasRestart,
+  onNasStatus,
   securitySet,
   login: (username: string, password: string) =>
     call<{ user: User }>("api_login", commands.login(username, password)),

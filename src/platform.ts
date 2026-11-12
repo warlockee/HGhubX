@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   GateState,
+  NasStatus,
   UpdateInfo,
 } from "./types";
 
@@ -30,3 +32,11 @@ export const setTextInteraction = (enabled: boolean) =>
 
 /** 安卓硬件返回键走到桌面后退出应用。 */
 export const exitApp = () => invoke<void>("plugin:app|exit", { code: 0 });
+
+/* 内置 NAS 服务（随应用启动的本机后端） */
+export const nasStatus = () => invoke<NasStatus>("nas_status");
+export const nasConfigure = (enabled: boolean, mediaDir: string, port?: number) =>
+  invoke<NasStatus>("nas_configure", { enabled, mediaDir, port });
+export const nasRestart = () => invoke<NasStatus>("nas_restart");
+export const onNasStatus = (fn: (s: NasStatus) => void): Promise<UnlistenFn> =>
+  listen<NasStatus>("nas-status", (e) => fn(e.payload));

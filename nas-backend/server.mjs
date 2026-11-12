@@ -452,6 +452,12 @@ const killJobs = () => { for (const j of hlsJobs.values()) try { j.proc?.kill("S
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => { killJobs(); process.exit(0); });
 process.on("exit", killJobs);
 
+// 由 HGhubX 应用拉起时：应用退出（包括崩溃）后自己也退出，避免留下孤儿进程
+if (process.env.HGHUBX_PARENT_PID) {
+  const parent = Number(process.env.HGHUBX_PARENT_PID);
+  setInterval(() => { try { process.kill(parent, 0); } catch { killJobs(); process.exit(0); } }, 2000).unref();
+}
+
 await scan();
 setInterval(() => scan().catch(console.error), 30 * 60 * 1000).unref(); // 网络盘上不监听目录变化，只定时重扫
 evictSoon();

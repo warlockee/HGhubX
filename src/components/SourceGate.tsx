@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { APP_NAME, APP_DESC } from "../branding";
 import { useStore } from "../store";
+import { isMobile } from "../api";
 import { ILink, Logo } from "../icons";
+import NasDialog from "./NasDialog";
 
 /** 门牌页：未激活时只显示输入框，不做任何业务请求；任意非空字符串都交给 gate_open。 */
 export default function SourceGate() {
   const { activateGate, gateBusy, gateError, gateReady } = useStore();
   const [value, setValue] = useState("");
+  const [nasOpen, setNasOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -68,7 +71,13 @@ export default function SourceGate() {
         <div className="text-[10.5px] text-dim mt-6 leading-relaxed">
           不校验地址格式，也不探测服务器；输入什么就连接什么。
         </div>
+        {!isMobile && (
+          <button onClick={() => setNasOpen(true)} className="mt-4 text-[12px] text-primary pressable">
+            或：把本机媒体目录作为片源（内置 NAS 服务）
+          </button>
+        )}
       </div>
+      <NasDialog open={nasOpen} onClose={() => setNasOpen(false)} />
     </div>
   );
 }

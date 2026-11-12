@@ -15,6 +15,7 @@ import { TopicsPage, TopicPage, TagsPage, TagPage } from "./pages/Discover";
 import { FollowingPage, UserPage } from "./pages/User";
 import LoginModal from "./components/LoginModal";
 import SourceGate from "./components/SourceGate";
+import NasSplash from "./components/NasSplash";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
@@ -268,7 +269,7 @@ function MobileShell() {
 
 /* ============ 入口 ============ */
 export default function App() {
-  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, gate, gateReady } = useStore();
+  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, gate, gateReady, nas, nasLoaded } = useStore();
   useEffect(() => {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);
@@ -339,8 +340,12 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, []);
 
-  if (!gateReady) {
+  if (!gateReady || !nasLoaded) {
     return <div className="absolute inset-0 bg-canvas" aria-busy="true" />;
+  }
+  // 启用了内置 NAS 服务：就绪之前不渲染业务界面（也就不会发出任何数据请求），只显示启动进度
+  if (nas.enabled && nas.state !== "ready") {
+    return <NasSplash />;
   }
   if (!gate.activated) {
     return <SourceGate />;

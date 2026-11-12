@@ -12,6 +12,7 @@ mod logging;
 mod macos_titlebar;
 mod media;
 mod media_dns;
+mod nas;
 mod net;
 mod network_policy;
 mod playback_log;
@@ -91,6 +92,8 @@ pub fn run() {
                 network_policy::bind_security(&dir);
                 infra::source::bind(&dir);
                 playback_log::bind(&dir);
+                // 内置 NAS 服务：启用时在这里（门牌之后）拉起后端，并把门牌指向本机服务
+                nas::init(app.handle(), &dir);
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -232,7 +235,16 @@ pub fn run() {
             api::api_like,
             api::api_collect,
             api::api_follow,
+            nas::nas_status,
+            nas::nas_configure,
+            nas::nas_restart,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // 应用退出时一并关掉内置后端（SIGTERM → Node 清理 ffmpeg 子进程）
+            if let tauri::RunEvent::Exit = event {
+                nas::shutdown();
+            }
+        });
 }

@@ -218,3 +218,18 @@ export type UpdateInfo = {
 };
 
 
+
+/** 内置 NAS 服务状态：Rust `nas::NasStatus` 的镜像。 */
+export type NasState = "off" | "starting" | "ready" | "error";
+export type NasStatus = {
+  enabled: boolean;
+  state: NasState;
+  message: string;
+  port: number;
+  media_dir: string;
+  /** 接入地址（本机回环） */
+  base: string;
+  videos: number | null;
+  categories: number | null;
+  log: string[];
+};
