@@ -1,5 +1,5 @@
 import Hls from "hls.js";
-import { isLocalMedia, playlist, platform } from "../api";
+import { isLocalMedia, mediaUrl, platform } from "../api";
 import { mediaHost, mediaResource, observeHls, type PlaybackTrace } from "./diagnostics";
 
 export type PlaybackEngineMode = "hls" | "native";
@@ -41,7 +41,7 @@ const HLS_CONFIG = {
   maxBufferLength: 60,
   maxMaxBufferLength: 120,
   maxBufferSize: 120 * 1000 * 1000,
-  backBufferLength: 30,
+  backBufferLength: 90,
   maxBufferHole: 0.5,
   nudgeOffset: 0.25,
   nudgeMaxRetry: 6,
@@ -61,7 +61,8 @@ const HLS_CONFIG = {
 export function createPlaybackEngine({
   video, src, autoPlay, trace, isActive, play, onBuffered, onError, applySettings,
 }: PlaybackEngineOptions): PlaybackEngine {
-  const url = isLocalMedia(src) ? src : playlist(src);
+  // m3u8 走 hls.js；mp4 等原文件走原生 <video>，经本地协议按 Range 取流（拖动进度条不用等切片）
+  const url = isLocalMedia(src) ? src : mediaUrl(src);
   const mode: PlaybackEngineMode = !url.includes("/seg?u=") && Hls.isSupported() ? "hls" : "native";
   trace("source.load", {
     engine: mode === "hls" ? "hls.js" : "native",

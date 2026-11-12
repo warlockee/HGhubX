@@ -272,3 +272,13 @@ export function directMedia(url: string): string {
 export function mediaUrl(url: string): string {
   return /\.m3u8(\?|$)/i.test(url) ? playlist(url) : directMedia(url);
 }
+
+/** 预热直连 mp4：开头几块 + 文件尾（mp4 的索引 moov 常在末尾）。
+ *  切到这个视频时数据已经在本地块缓存里，首帧更快；失败无所谓。m3u8 由后端和 hls.js 自己处理。 */
+export function warmMedia(url: string): void {
+  if (!url || /\.m3u8(\?|$)/i.test(url)) return;
+  const u = directMedia(url);
+  for (const range of ["bytes=0-", "bytes=-1048576"]) {
+    fetch(u, { headers: { Range: range } }).then((r) => r.arrayBuffer()).catch(() => { /* 预热失败不影响播放 */ });
+  }
+}

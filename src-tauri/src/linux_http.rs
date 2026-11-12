@@ -49,11 +49,17 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
     if reader.read_line(&mut request_line)? == 0 {
         return Ok(());
     }
-    // 请求头整体丢弃：每个分片都是整包返回，不需要处理 Range。
+    // 只关心 Range（mp4 直连播放拖动进度要用），其余请求头丢弃。
+    let mut range: Option<String> = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 || line.trim_end().is_empty() {
             break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("range") {
+                range = Some(value.trim().to_string());
+            }
         }
     }
 
@@ -69,7 +75,7 @@ fn serve(mut stream: TcpStream) -> std::io::Result<()> {
         None => (target, ""),
     };
 
-    let response = tauri::async_runtime::block_on(crate::media::handle(path, query, ORIGIN));
+    let response = tauri::async_runtime::block_on(crate::media::handle(path, query, ORIGIN, range.as_deref()));
     let (parts, body) = response.into_parts();
 
     let mut head = String::with_capacity(320);

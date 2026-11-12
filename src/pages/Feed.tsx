@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, cover, fmt, fmtTime, isMobile, logLine, mediaUrl } from "../api";
+import { api, cover, fmt, fmtTime, isMobile, logLine, mediaUrl, warmMedia } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "../components/ui";
@@ -379,7 +379,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           api.play(nextId, nextEp)
             .then((info) => {
               const nextSource = toPlaybackSource(info);
-              if (nextSource) setSources((m) => ({ ...m, [nk]: nextSource }));
+              if (nextSource) { setSources((m) => ({ ...m, [nk]: nextSource })); warmMedia(nextSource.mainUrl); }
             })
             .catch(() => { /* 预热失败不影响当前播放 */ });
         }, 2500);

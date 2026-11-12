@@ -153,13 +153,19 @@ pub fn run() {
                 return;
             }
             let uri = request.uri().clone();
+            // mp4 直连播放靠 Range 拖动进度，必须带给媒体层
+            let range = request
+                .headers()
+                .get("Range")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let path = uri.path().to_string();
             let query = uri.query().unwrap_or("").to_string();
             // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
             // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
             tauri::async_runtime::spawn(async move {
-                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN).await;
+                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN, range.as_deref()).await;
                 if let Some(origin) =
                     request_origin.and_then(|s| tauri::http::HeaderValue::from_str(&s).ok())
                 {

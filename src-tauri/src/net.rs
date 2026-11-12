@@ -151,7 +151,7 @@ pub async fn get(
     accept: Option<&str>,
     referer: Option<&str>,
 ) -> Result<reqwest::Response, String> {
-    get_with_dns(raw, timeout, accept, referer, false).await
+    get_with_dns(raw, timeout, accept, referer, false, None).await
 }
 
 async fn get_with_dns(
@@ -160,6 +160,7 @@ async fn get_with_dns(
     accept: Option<&str>,
     referer: Option<&str>,
     public_dns: bool,
+    range: Option<&str>,
 ) -> Result<reqwest::Response, String> {
     tokio::time::timeout(timeout, async {
         let policy_error = |phase: &str, error: String| {
@@ -177,6 +178,9 @@ async fn get_with_dns(
             }
             if let Some(value) = referer {
                 request = request.header("Referer", value);
+            }
+            if let Some(value) = range {
+                request = request.header("Range", value);
             }
             let response = request.send().await.map_err(|e| err_text(&e))?;
             if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
@@ -828,6 +832,47 @@ pub async fn edge_envelope(
     }
 }
 
+/// Range 取流的结果：状态码只会是 206 / 416。
+pub struct RangeResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub content_range: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+/// 带 Range 的取流（mp4 等原文件直连播放，拖动进度条靠它）。
+/// 上游不支持 Range（返回整个文件）时直接报错，绝不把几个 GB 读进内存。
+pub async fn fetch_range(url: &str, range: &str) -> Result<RangeResponse, String> {
+    let referer = format!("{}/", base());
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let result: Result<RangeResponse, String> = async {
+            let resp = get_with_dns(url, Duration::from_secs(20), None, Some(&referer), false, Some(range)).await?;
+            let status = resp.status().as_u16();
+            let header = |name: reqwest::header::HeaderName| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let content_type = header(reqwest::header::CONTENT_TYPE);
+            let content_range = header(reqwest::header::CONTENT_RANGE);
+            match status {
+                206 => {
+                    let bytes = resp.bytes().await.map_err(|e| err_text(&e))?.to_vec();
+                    Ok(RangeResponse { status, content_type, content_range, bytes })
+                }
+                416 => Ok(RangeResponse { status, content_type, content_range, bytes: Vec::new() }),
+                200 => Err("上游不支持 Range，无法直连播放".into()),
+                other => Err(format!("HTTP {other}")),
+            }
+        }.await;
+        match result {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = e;
+                if attempt == 0 { tokio::time::sleep(Duration::from_millis(250)).await; }
+            }
+        }
+    }
+    Err(last)
+}
+
 /// 拉原始字节（图片 / m3u8 / 分片）。
 pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String> {
     static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -856,7 +901,7 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
             let mut status = None;
             let mut headers_ms = None;
             let result = async {
-                let resp = get_with_dns(&url, Duration::from_secs(20), None, Some(&referer), using_public_dns).await?;
+                let resp = get_with_dns(&url, Duration::from_secs(20), None, Some(&referer), using_public_dns, None).await?;
                 status = Some(resp.status().as_u16());
                 headers_ms = Some(started.elapsed().as_millis() as u64);
                 if !resp.status().is_success() {

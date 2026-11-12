@@ -9,7 +9,7 @@ use aes::cipher::{BlockDecrypt, KeyInit};
 use aes::Aes128;
 use once_cell::sync::Lazy;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::http::{Response, StatusCode};
 
@@ -312,6 +312,218 @@ pub fn clear_caches() {
     }
 }
 
+/* ───────────────────────── Range（mp4 直连播放） ───────────────────────── */
+//
+// 原生 <video> 经自定义协议读 mp4：WebKit 会发大量很小的 Range（几百字节~几 KB，探测 moov / 逐段取样），
+// 拖动进度条还会跳到任意位置。做法是 1MB 对齐的块缓存：
+//   - 任意区间都由块拼出，小请求命中缓存只要 1 毫秒；
+//   - 缺的块并发向上游取（网络盘首字节慢，并发能把延迟摊平）；
+//   - 顺序向前读时提前预读后面 READ_AHEAD 块，顺序播放不断档；
+//   - 拖动（非顺序）后的第一次响应只给 1MB，画面更早出来。
+
+const BLOCK: u64 = 1024 * 1024;
+/// 顺序读取时单次响应的上限（浏览器对 `bytes=N-` 会等整段，不能真拉到文件末尾，回短块它会接着请求）。
+const RESP_SEQ: u64 = 4 * BLOCK;
+/// 拖动后第一次响应的上限：小块首字节更快。
+const RESP_SEEK: u64 = BLOCK;
+/// 顺序播放时向前预读的块数。
+const READ_AHEAD: u64 = 8;
+const BLOCK_CACHE_MAX: usize = 200; // ≈200MB
+
+static BLOCKS: Lazy<Mutex<HashMap<String, (u64, Arc<Vec<u8>>)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+/// 每个源的 (文件总长, Content-Type)
+static META: Lazy<Mutex<HashMap<String, (u64, String)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static PENDING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// 每个源最近一次响应的末尾字节：用来区分顺序播放和拖动。
+static LAST_END: Lazy<Mutex<HashMap<String, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static BLOCK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn block_get(key: &str) -> Option<Arc<Vec<u8>>> {
+    let seq = BLOCK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BLOCKS.lock().unwrap().get_mut(key).map(|(s, v)| { *s = seq; v.clone() })
+}
+
+fn block_put(key: String, data: Arc<Vec<u8>>) {
+    let mut m = BLOCKS.lock().unwrap();
+    if m.len() >= BLOCK_CACHE_MAX && !m.contains_key(&key) {
+        if let Some(old) = m.iter().min_by_key(|(_, (seq, _))| *seq).map(|(k, _)| k.clone()) {
+            m.remove(&old);
+        }
+    }
+    let seq = BLOCK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    m.insert(key, (seq, data));
+}
+
+/// 解析 `bytes=a-b` / `bytes=a-` / `bytes=-n`；多段 Range 不支持。
+#[derive(Debug, PartialEq, Eq)]
+enum ByteRange {
+    From { start: u64, end: Option<u64> },
+    Suffix(u64),
+}
+
+fn parse_range(header: &str) -> Option<ByteRange> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    match (a.trim(), b.trim()) {
+        ("", "") => None,
+        ("", n) => n.parse().ok().map(ByteRange::Suffix),
+        (s, "") => s.parse().ok().map(|start| ByteRange::From { start, end: None }),
+        (s, e) => {
+            let (start, end): (u64, u64) = (s.parse().ok()?, e.parse().ok()?);
+            (end >= start).then_some(ByteRange::From { start, end: Some(end) })
+        }
+    }
+}
+
+/// 实际响应的末尾字节：不超过请求、不超过文件末尾、不超过本次上限。
+fn clamp_end(start: u64, end_req: u64, total: u64, cap: u64) -> u64 {
+    end_req.min(total.saturating_sub(1)).min(start.saturating_add(cap - 1))
+}
+
+/// 是不是需要按 Range 直连的原文件（HLS 分片 / key 不走这条路）。
+fn is_progressive_media(url: &str) -> bool {
+    let p = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    [".mp4", ".m4v", ".mov", ".webm"].iter().any(|ext| p.ends_with(ext))
+}
+
+fn respond_range(status: u16, ctype: &str, content_range: &str, body: Vec<u8>) -> Response<Vec<u8>> {
+    let len = body.len().to_string();
+    let mut b = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::PARTIAL_CONTENT))
+        .header("Content-Type", ctype)
+        .header("Content-Length", len)
+        .header("Accept-Ranges", "bytes")
+        .header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Type, Accept-Ranges")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store");
+    if !content_range.is_empty() {
+        b = b.header("Content-Range", content_range);
+    }
+    b.body(body).unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+/// `Content-Range: bytes a-b/total` → total
+fn parse_total(cr: &str) -> Option<u64> {
+    cr.trim().strip_prefix("bytes ")?.split_once('/')?.1.trim().parse().ok()
+}
+
+async fn fetch_block(url: &str, idx: u64) -> Result<Arc<Vec<u8>>, String> {
+    let range = format!("bytes={}-{}", idx * BLOCK, (idx + 1) * BLOCK - 1);
+    let r = crate::net::fetch_range(url, &range).await?;
+    if r.status == 416 {
+        return Err("416".into());
+    }
+    if let Some(total) = r.content_range.as_deref().and_then(parse_total) {
+        META.lock().unwrap().insert(url.to_string(), (total, r.content_type.clone().unwrap_or_else(|| "video/mp4".into())));
+    }
+    let data = Arc::new(r.bytes);
+    block_put(format!("{url}|{idx}"), data.clone());
+    Ok(data)
+}
+
+/// 取一块：命中缓存直接返回；别人（预读）正在取同一块就等它；否则自己取。
+async fn get_block(url: &str, idx: u64) -> Result<Arc<Vec<u8>>, String> {
+    let key = format!("{url}|{idx}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        if let Some(hit) = block_get(&key) {
+            return Ok(hit);
+        }
+        if PENDING.lock().unwrap().insert(key.clone()) {
+            let result = fetch_block(url, idx).await;
+            PENDING.lock().unwrap().remove(&key);
+            return result;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("等待媒体块超时".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+}
+
+fn prefetch_blocks(url: &str, from: u64, total: u64) {
+    let blocks = total.div_ceil(BLOCK);
+    for idx in from..(from + READ_AHEAD).min(blocks) {
+        let key = format!("{url}|{idx}");
+        if BLOCKS.lock().unwrap().contains_key(&key) || PENDING.lock().unwrap().contains(&key) {
+            continue;
+        }
+        let url = url.to_string();
+        tauri::async_runtime::spawn(async move {
+            let _ = get_block(&url, idx).await;
+        });
+    }
+}
+
+async fn range_response(url: &str, range_header: &str) -> Response<Vec<u8>> {
+    let Some(range) = parse_range(range_header) else {
+        return respond(416, "text/plain", b"bad range".to_vec(), "no-store");
+    };
+    let fail = |e: String| respond(502, "text/plain", e.into_bytes(), "no-store");
+    // 先拿到文件总长（第一次请求会顺带取第 0 块）
+    let mut meta = META.lock().unwrap().get(url).cloned();
+    if meta.is_none() {
+        if let Err(e) = get_block(url, 0).await {
+            return fail(e);
+        }
+        meta = META.lock().unwrap().get(url).cloned();
+    }
+    let Some((total, ctype)) = meta else {
+        return fail("上游没有给出文件总长度".into());
+    };
+    let (start, end_req, from_range) = match range {
+        ByteRange::From { start, end } => (start, end.unwrap_or(u64::MAX), true),
+        ByteRange::Suffix(n) => (total.saturating_sub(n.min(total)), u64::MAX, false),
+    };
+    if start >= total {
+        return respond_range(416, "text/plain", &format!("bytes */{total}"), Vec::new());
+    }
+    // 从上次结束位置往前不远处接着读 = 顺序播放；否则是拖动 / 探测
+    let forward = from_range
+        && LAST_END.lock().unwrap().get(url).is_some_and(|end| start > *end && start - *end <= 2 * BLOCK || start == *end + 1);
+    let end = clamp_end(start, end_req, total, if forward { RESP_SEQ } else { RESP_SEEK });
+    let (first, last) = (start / BLOCK, end / BLOCK);
+
+    // 缺的块并发取
+    let handles: Vec<_> = (first..=last)
+        .map(|idx| {
+            let url = url.to_string();
+            tauri::async_runtime::spawn(async move { get_block(&url, idx).await })
+        })
+        .collect();
+    let mut body = Vec::with_capacity((end - start + 1) as usize);
+    for (idx, handle) in (first..=last).zip(handles) {
+        let block = match handle.await {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) if e == "416" => return respond_range(416, "text/plain", &format!("bytes */{total}"), Vec::new()),
+            Ok(Err(e)) => return fail(e),
+            Err(e) => return fail(e.to_string()),
+        };
+        let base = idx * BLOCK;
+        let lo = (start.max(base) - base) as usize;
+        let hi = ((end + 1).min(base + BLOCK) - base) as usize;
+        if lo >= block.len() {
+            return fail("上游返回的数据比声明的短".into());
+        }
+        body.extend_from_slice(&block[lo..hi.min(block.len())]);
+    }
+
+    if from_range {
+        let mut last_end = LAST_END.lock().unwrap();
+        if last_end.len() > 16 { last_end.clear(); }
+        last_end.insert(url.to_string(), end);
+        drop(last_end);
+        // 顺序读取 / 从文件开头开始读：预读后面几块，起播和连续播放都不断档
+        if forward || start == 0 {
+            prefetch_blocks(url, last + 1, total);
+        }
+    }
+    respond_range(206, &ctype, &format!("bytes {start}-{end}/{total}"), body)
+}
+
 /* ───────────────────────── 协议响应 ───────────────────────── */
 
 fn respond(status: u16, ctype: &str, body: Vec<u8>, cache: &str) -> Response<Vec<u8>> {
@@ -368,7 +580,7 @@ fn segment_response(
 ///
 /// `origin` 是本平台自定义协议的完整基址，见 [`LOCAL_ORIGIN`]；用于改写 m3u8 里的
 /// 分片与 key 地址。正常情况下调用方直接传 [`LOCAL_ORIGIN`]。
-pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> {
+pub async fn handle(path: &str, query: &str, origin: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let target = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("u="))
@@ -406,6 +618,7 @@ pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> 
             ),
             Err(e) => respond(502, "text/plain", e.into_bytes(), "no-store"),
         },
+        "/seg" if range.is_some() && is_progressive_media(&target) => range_response(&target, range.unwrap_or_default()).await,
         "/seg" => match load_segment(&target).await {
             Ok((ctype, bytes)) => segment_response(&target, ctype.as_deref(), bytes.as_ref().clone(), origin),
             Err(e) => respond(502, "text/plain", e.into_bytes(), "no-store"),
@@ -506,7 +719,7 @@ mod tests {
             &text[..text.len().min(160)]
         );
         let q = format!("u={}", enc(&url));
-        let resp = handle("/hls", &q, LOCAL_ORIGIN).await;
+        let resp = handle("/hls", &q, LOCAL_ORIGIN, None).await;
         let body = String::from_utf8_lossy(resp.body()).to_string();
         println!("proxied status={} len={}", resp.status(), body.len());
         assert!(body.contains("#EXTM3U"));
@@ -518,7 +731,7 @@ mod tests {
             .to_string();
         println!("seg line: {}", &seg_line[..seg_line.len().min(120)]);
         let seg_q = seg_line.split("?u=").nth(1).unwrap();
-        let seg = handle("/seg", &format!("u={seg_q}"), LOCAL_ORIGIN).await;
+        let seg = handle("/seg", &format!("u={seg_q}"), LOCAL_ORIGIN, None).await;
         println!("segment status={} len={}", seg.status(), seg.body().len());
         assert_eq!(seg.status(), 200);
         assert!(seg.body().len() > 1000);
@@ -598,5 +811,31 @@ mod tests {
             }
             Err(e) => panic!("image failed: {e}"),
         }
+    }
+
+    #[test]
+    fn range_parsing_and_clamping() {
+        assert_eq!(parse_range("bytes=0-"), Some(ByteRange::From { start: 0, end: None }));
+        assert_eq!(parse_range("bytes=10-19"), Some(ByteRange::From { start: 10, end: Some(19) }));
+        assert_eq!(parse_range("bytes=-500"), Some(ByteRange::Suffix(500)));
+        assert_eq!(parse_range("bytes=0-1,5-9"), None);
+        assert_eq!(parse_range("bytes=9-3"), None);
+        assert_eq!(parse_range("items=0-1"), None);
+        let total = 100 * BLOCK;
+        // 开放区间被裁到本次上限；小请求原样；不越过文件末尾
+        assert_eq!(clamp_end(100, u64::MAX, total, RESP_SEQ), 100 + RESP_SEQ - 1);
+        assert_eq!(clamp_end(100, u64::MAX, total, RESP_SEEK), 100 + RESP_SEEK - 1);
+        assert_eq!(clamp_end(0, 1, total, RESP_SEQ), 1);
+        assert_eq!(clamp_end(total - 10, u64::MAX, total, RESP_SEQ), total - 1);
+    }
+
+    #[test]
+    fn content_range_total_and_progressive_detection() {
+        assert_eq!(parse_total("bytes 0-1048575/1000000000"), Some(1000000000));
+        assert_eq!(parse_total("bytes */1000"), Some(1000));
+        assert_eq!(parse_total("garbage"), None);
+        assert!(is_progressive_media("http://192.168.1.2:8080/media/file/1/1.mp4?x=1"));
+        assert!(!is_progressive_media("http://192.168.1.2:8080/media/hls/1/1/seg_00001.ts"));
+        assert!(!is_progressive_media("http://h/index.m3u8"));
     }
 }
