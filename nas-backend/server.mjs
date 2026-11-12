@@ -129,6 +129,14 @@ function probe(file) {
   return probeJobs.get(file);
 }
 
+/** 能不能原文件直连播放：mp4/m4v/mov 容器 + H.264(yuv420p) + AAC/MP3，所有 WebView 都能硬解，
+ *  靠 HTTP Range 拖动进度条，零等待、不占缓存。其余（mkv/avi/HEVC/AC3…）才封装成 HLS。 */
+const DIRECT_EXT = new Set([".mp4", ".m4v", ".mov"]);
+function canDirectPlay(file, info) {
+  return DIRECT_EXT.has(path.extname(file).toLowerCase()) && info.vcodec === "h264" &&
+    (!info.pixfmt || info.pixfmt === "yuv420p") && (!info.acodec || info.acodec === "aac" || info.acodec === "mp3");
+}
+
 /* ───────────── 封面 ───────────── */
 
 const coverJobs = new Map();
@@ -328,9 +336,12 @@ async function route(method, rawPath, body, base) {
     const v = LIBRARY.byId.get(+m[1]);
     const ep = m[2] ? +m[2] : Number(q.get("ep")) || 1;
     if (!v || ep < 1 || ep > v.files.length) return fail("影片不存在");
-    await ensureHls(v, ep);
-    const info = cachedProbe(v.files[ep - 1]) || { duration: 0 };
-    const url = `${base}/media/hls/${v.id}/${ep}/index.m3u8`;
+    const file = v.files[ep - 1];
+    const info = await probe(file).catch(() => null);
+    if (!info) return fail("无法读取视频信息");
+    let url;
+    if (canDirectPlay(file, info)) url = `${base}/media/file/${v.id}/${ep}${path.extname(file).toLowerCase()}`;
+    else { await ensureHls(v, ep); url = `${base}/media/hls/${v.id}/${ep}/index.m3u8`; }
     return ok({ id: v.id, ep_num: ep, duration: info.duration, title: v.title, video_url: url, streams: { main: url } });
   }
   if ((m = p.match(/^\/api\/videos\/(\d+)$/))) { const v = LIBRARY.byId.get(+m[1]); return v ? ok(await detail(v, base)) : fail("影片不存在"); }
@@ -374,7 +385,10 @@ function sendFile(req, res, file, ctype, extra = {}) {
     ...(code === 206 && { "Content-Range": `bytes ${start}-${end}/${st.size}` }),
   });
   if (req.method === "HEAD") return res.end();
-  fs.createReadStream(file, { start, end }).pipe(res);
+  const stream = fs.createReadStream(file, { start, end, highWaterMark: 1 << 20 });
+  res.on("close", () => stream.destroy()); // 客户端拖动进度条会中断请求：立刻停读，别白白占用网络盘带宽
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -401,6 +415,19 @@ const server = http.createServer(async (req, res) => {
       const f = await coverPath(v);
       const ext = path.extname(f).toLowerCase();
       return sendFile(req, res, f, ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg", { "Cache-Control": "public, max-age=86400" });
+    }
+    if ((m = url.pathname.match(/^\/media\/file\/(\d+)\/(\d+)\.(mp4|m4v|mov)$/))) {
+      const v = LIBRARY.byId.get(+m[1]);
+      const file = v?.files[+m[2] - 1];
+      if (!file) return void res.writeHead(404).end();
+      return sendFile(req, res, file, m[3] === "mov" ? "video/quicktime" : "video/mp4", { "Cache-Control": "no-store" });
+    }
+    if ((m = url.pathname.match(/^\/media\/file\/(\d+)\/(\d+)\.(mp4|m4v|mov)$/))) {
+      // 原文件直连：sendFile 支持 Range，客户端拖动进度条直接按字节取
+      const v = LIBRARY.byId.get(+m[1]);
+      const file = v?.files[+m[2] - 1];
+      if (!file) return void res.writeHead(404).end();
+      return sendFile(req, res, file, m[3] === "mov" ? "video/quicktime" : "video/mp4", { "Cache-Control": "no-store" });
     }
     if ((m = url.pathname.match(/^\/media\/hls\/(\d+)\/(\d+)\/(index\.m3u8|seg_\d+\.ts)$/))) {
       const file = path.join(CACHE_DIR, "hls", m[1], m[2], m[3]);
