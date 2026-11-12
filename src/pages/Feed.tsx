@@ -367,6 +367,24 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   /* 剧集预热：相邻集提前取好播放地址，切集秒开 */
   useEffect(() => {
     if (!curId || kind !== "video") return;
+    // 下一个条目（上下滑切换）的首集也预热：后端首次播放要现封装 HLS，提前触发就能秒开。
+    // 延后 2.5 秒再发，避免和当前条目的起播抢网络盘带宽。
+    const nextId = videoIds[index + 1];
+    let warmTimer: ReturnType<typeof setTimeout> | undefined;
+    if (nextId) {
+      const nextEp = epMap[nextId] || 1;
+      const nk = episodeKey(nextId, nextEp);
+      if (!sources[nk]) {
+        warmTimer = setTimeout(() => {
+          api.play(nextId, nextEp)
+            .then((info) => {
+              const nextSource = toPlaybackSource(info);
+              if (nextSource) setSources((m) => ({ ...m, [nk]: nextSource }));
+            })
+            .catch(() => { /* 预热失败不影响当前播放 */ });
+        }, 2500);
+      }
+    }
     const ep = epMap[curId] || 1;
     const want: number[] = [];
     const prev = previousEpisodeNumber(episodes, ep);
@@ -383,6 +401,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         })
         .catch(() => { /* 预热失败不影响当前播放 */ });
     }
+    return () => { if (warmTimer) clearTimeout(warmTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [curId, curEp, episodes.length]);
 

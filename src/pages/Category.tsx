@@ -1,24 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fmt } from "../api";
-import type { Post, VideoCard } from "../types";
+import type { VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RowCard } from "../components/cards";
 import { InplaceSearch } from "../components/InplaceSearch";
-import { Empty, Img } from "../components/ui";
+import { Empty } from "../components/ui";
 import { IBack, IChevR, IGlobe, IGrid, ISearch, ITrophy } from "../icons";
 
-export const CHANNELS = [
-  { cate: "ai-duanju", name: "AI成人短剧", desc: "高能反转 · 一口气看完" },
-  { cate: "ai-manju", name: "AI成人漫剧", desc: "国创漫剧 · 每周更新" },
-  { cate: "ai-huanlian", name: "AI换脸", desc: "换脸演绎 · 全新剧情" },
-  { cate: "ai-mogai", name: "AI魔改", desc: "魔改名场面 · 脑洞大开" },
-] as const;
+/** 分类由后端按内容动态给出（api.tags），客户端不再写死任何频道 */
+type Channel = { cate: string; name: string };
 
 /* ================= 分类总览 ================= */
 export default function Category({ wide, active }: { wide: boolean; active: boolean }) {
   const { push, lineEpoch } = useStore();
   const [rows, setRows] = useState<Record<string, VideoCard[]>>({});
-  const [posts, setPosts] = useState<Post[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [totals, setTotals] = useState<Record<string, number>>({});
+  const [listState, setListState] = useState<{ loading: boolean; error: string }>({ loading: true, error: "" });
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const mounted = useRef(false);
@@ -42,12 +40,10 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
     setLoading(m => ({ ...m, [key]: true }));
     setErrors(m => ({ ...m, [key]: "" }));
     try {
-      if (key === "posts") {
-        const result = await api.posts(1, 8);
-        if (mounted.current) setPosts(result?.items || []);
-      } else {
-        const result = await api.category(key, 1, 8);
-        if (mounted.current) setRows(m => ({ ...m, [key]: result?.items || [] }));
+      const result = await api.category(key, 1, 8);
+      if (mounted.current) {
+        setRows(m => ({ ...m, [key]: result?.items || [] }));
+        setTotals(m => ({ ...m, [key]: result?.pagination?.total ?? (result?.items || []).length }));
       }
     } catch (error) {
       const stale = requestEpoch !== lineEpochRef.current;
@@ -62,13 +58,35 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
     }
   }, []);
 
+  const loadChannels = useCallback(async () => {
+    setListState({ loading: true, error: "" });
+    try {
+      const res = await api.tags();
+      const seen = new Set<string>();
+      const list: Channel[] = [];
+      for (const group of res?.categories || []) {
+        for (const tag of group.tags || []) {
+          const cate = tag.slug || tag.name;
+          if (!cate || seen.has(cate)) continue;
+          seen.add(cate);
+          list.push({ cate, name: tag.name || cate });
+        }
+      }
+      if (!mounted.current) return;
+      setChannels(list);
+      setListState({ loading: false, error: "" });
+      list.forEach(c => { void loadPreview(c.cate); });
+    } catch (error) {
+      if (mounted.current) setListState({ loading: false, error: (error as Error).message || "加载失败" });
+    }
+  }, [loadPreview]);
+
   useEffect(() => {
-    // 首次打开分类才加载，避免启动时后台频道请求/封面与首页视频竞争网络。
+    // 首次打开分类才加载，避免启动时后台请求/封面与首页视频竞争网络。
     if (!active || started.current) return;
     started.current = true;
-    CHANNELS.forEach(c => { void loadPreview(c.cate); });
-    void loadPreview("posts");
-  }, [active, loadPreview]);
+    void loadChannels();
+  }, [active, loadChannels]);
 
   /* 线路切换后：已打开过的分类里，加载失败的栏目在新线路上重试一次 */
   useEffect(() => {
@@ -81,7 +99,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
       <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
         <div className="flex items-end gap-2.5">
           <span className="text-[24px] font-bold text-on leading-none">分类</span>
-          <span className="text-[11px] text-mut pb-0.5">{CHANNELS.length + 1} 个频道 · 每周持续上新</span>
+          <span className="text-[11px] text-mut pb-0.5">{listState.loading ? "加载中…" : `${channels.length} 个分类`}</span>
         </div>
       </div>
 
@@ -97,29 +115,18 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
           <IChevR size={16} className="text-mut" />
         </button>
 
-        {/* 专题 + 标签入口 */}
-        <div className="mx-4 mb-5 grid grid-cols-2 gap-2.5">
-          <button onClick={() => push({ kind: "topics" })}
-            className="flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-3 text-left pressable elev-1">
-            <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><IGrid size={18} /></span>
-            <span className="flex-1">
-              <span className="block text-[13.5px] font-semibold text-on">专题</span>
-              <span className="block text-[10px] text-mut mt-0.5">精选专辑合集</span>
-            </span>
-            <IChevR size={14} className="text-mut" />
-          </button>
-          <button onClick={() => push({ kind: "tags" })}
-            className="flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-3 text-left pressable elev-1">
-            <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><IGlobe size={18} /></span>
-            <span className="flex-1">
-              <span className="block text-[13.5px] font-semibold text-on">标签</span>
-              <span className="block text-[10px] text-mut mt-0.5">按题材找片</span>
-            </span>
-            <IChevR size={14} className="text-mut" />
-          </button>
-        </div>
+        {/* 标签入口 */}
+        <button onClick={() => push({ kind: "tags" })}
+          className="mx-4 mb-5 w-[calc(100%-2rem)] flex items-center gap-3 rounded-(--r-md) bg-s2 p-3 text-left pressable elev-1">
+          <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><IGlobe size={18} /></span>
+          <span className="flex-1">
+            <span className="block text-[13.5px] font-semibold text-on">全部标签</span>
+            <span className="block text-[10px] text-mut mt-0.5">按文件夹与子目录找片</span>
+          </span>
+          <IChevR size={14} className="text-mut" />
+        </button>
 
-        {CHANNELS.map((c, ci) => {
+        {channels.map((c, ci) => {
           const list = rows[c.cate] || [];
           return (
             <section key={c.cate} aria-label={c.name} className="mb-5 a-rise" style={{ animationDelay: `${Math.min(ci * 50, 300)}ms` }}>
@@ -130,7 +137,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
                 </span>
                 <span className="flex-1 min-w-0">
                   <span className="block text-[15.5px] font-semibold text-on leading-tight">{c.name}</span>
-                  <span className="block text-[10.5px] text-mut mt-0.5 truncate">{c.desc}</span>
+                  <span className="block text-[10.5px] text-mut mt-0.5 truncate">{totals[c.cate] != null ? `共 ${totals[c.cate]} 部` : "加载中…"}</span>
                 </span>
                 <span className="flex items-center gap-0.5 text-[11.5px] text-mut group-hover:text-primary transition-colors">
                   全部<IChevR size={14} />
@@ -146,38 +153,11 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
           );
         })}
 
-        {/* 吃瓜 */}
-        <section aria-label="吃瓜" className="mb-5 a-rise">
-          <button onClick={() => push({ kind: "posts" })}
-            className="w-full flex items-center gap-2.5 px-4 mb-2.5 text-left pressable group">
-            <span className="w-[36px] h-[36px] rounded-(--r-sm) tonal flex items-center justify-center shrink-0 text-primary">
-              <IGrid size={19} strokeWidth={1.9} />
-            </span>
-            <span className="flex-1 min-w-0">
-              <span className="block text-[15.5px] font-semibold text-on leading-tight">吃瓜</span>
-              <span className="block text-[10.5px] text-mut mt-0.5 truncate">圈内爆料 · 每日更新</span>
-            </span>
-            <span className="flex items-center gap-0.5 text-[11.5px] text-mut group-hover:text-primary transition-colors">
-              全部<IChevR size={14} />
-            </span>
-          </button>
-          <div className="scroll-x flex gap-2.5 px-4 snap-x">
-            {posts.map((post) => (
-              <button key={post.id} onClick={() => push({ kind: "post", id: post.id })}
-                className="w-[104px] shrink-0 text-left snap-start pressable">
-                <div className="relative w-full rounded-(--r-sm) overflow-hidden bg-s1 elev-1" style={{ paddingTop: "133%" }}>
-                  <Img src={post.cover} />
-                  <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/75 to-transparent" />
-                  <span className="absolute bottom-1.5 right-1.5 text-[9px] font-semibold text-white/90 tsh">{fmt(post.hot)}</span>
-                </div>
-                <div className="mt-1.5 text-[11.5px] font-medium text-on clamp-1 leading-tight">{post.title}</div>
-              </button>
-            ))}
-            {!posts.length && <PreviewStatus name="吃瓜" loading={loading.posts !== false} error={errors.posts} onRetry={() => void loadPreview("posts")} />}
-          </div>
-        </section>
+        {!channels.length && (listState.loading
+          ? <div className="flex justify-center py-10"><div className="w-8 h-8 spinner" /></div>
+          : <Empty icon={<IGrid size={26} />} title={listState.error ? "加载失败" : "暂无分类"} sub={listState.error || "媒体库里还没有内容"} action="重试" onAction={() => void loadChannels()} />)}
 
-        <div className="px-4 text-center text-[10.5px] text-dim pt-1">— 已展示全部频道 —</div>
+        <div className="px-4 text-center text-[10.5px] text-dim pt-1">— 已展示全部分类 —</div>
       </div>
       {wide && <div />}
     </div>

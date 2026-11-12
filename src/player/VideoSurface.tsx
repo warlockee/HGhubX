@@ -184,6 +184,7 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
         onDuration?.(v.duration || 0);
         reportSize(v);
       }}
+      onDurationChange={(e) => { const d = (e.target as HTMLVideoElement).duration; if (d && Number.isFinite(d)) onDuration?.(d); }}
       onPlay={() => { if (activity.isActive()) onPlaying?.(); }}
       onPause={() => onPause?.()}
       onWaiting={() => onWaiting?.()}

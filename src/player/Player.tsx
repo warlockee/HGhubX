@@ -146,6 +146,7 @@ export default function Player({
         onSeeked={() => setWaiting(false)}
         onTimeUpdate={(e) => setTime((e.target as HTMLVideoElement).currentTime)}
         onLoadedMetadata={(e) => setDuration((e.target as HTMLVideoElement).duration || 0)}
+        onDurationChange={(e) => { const d = (e.target as HTMLVideoElement).duration; if (d && Number.isFinite(d)) setDuration(d); }}
         onEnded={() => { if (activity.isActive()) onEnded?.(); }}
         onError={() => {
           if (hlsRef.current) return;

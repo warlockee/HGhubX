@@ -208,7 +208,10 @@ pub async fn load_playlist(url: &str, prefix: &str) -> Result<Arc<String>, Strin
         return Err("响应不是 HLS 播放列表".into());
     }
     let arc = Arc::new(rewrite_playlist(url, text, prefix));
-    cache_put(&PL_CACHE, cache_key, arc.clone(), PL_CACHE_MAX);
+    // 没有 ENDLIST 的是仍在增长的直播 / 边切边播列表：缓存会让它永远停在旧版本，不缓存
+    if text.contains("#EXT-X-ENDLIST") {
+        cache_put(&PL_CACHE, cache_key, arc.clone(), PL_CACHE_MAX);
+    }
     Ok(arc)
 }
 
