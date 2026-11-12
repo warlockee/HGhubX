@@ -138,6 +138,17 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// 目标是否就是用户亲手填写的「接入地址」所在主机（只比主机名，端口不限）。
+/// 自建 NAS / 局域网服务在内网，严格模式下也要放行这台主机；
+/// 接口返回的其他地址仍按严格模式拦截，所以不会变成通向内网的开放代理。
+pub fn is_source_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    Url::parse(&crate::infra::source::base())
+        .ok()
+        .and_then(|base| base.host_str().map(|h| h.trim_end_matches('.').eq_ignore_ascii_case(host.trim_end_matches('.'))))
+        .unwrap_or(false)
+}
+
 pub fn parse_target(raw: &str) -> Result<Url, String> {
     parse_target_with_mode(raw, strict_security())
 }
@@ -153,6 +164,7 @@ pub fn parse_target_with_mode(raw: &str, strict: bool) -> Result<Url, String> {
     {
         return Err("目标只允许不带认证信息的 HTTP(S) 地址".into());
     }
+    let strict = strict && !is_source_host(&url);
     match url.host().ok_or("目标缺少主机名")? {
         Host::Ipv4(ip) if strict => check_ip(ip.into())?,
         Host::Ipv6(ip) if strict => check_ip(ip.into())?,
@@ -208,6 +220,7 @@ fn sort_ipv6_first(addrs: &mut [SocketAddr]) {
 }
 
 pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, String> {
+    let strict = strict && !is_source_host(url);
     let port = url.port_or_known_default().ok_or("目标端口无效")?;
     let mut addrs = match url.host().ok_or("目标缺少主机名")? {
         Host::Ipv4(ip) => vec![SocketAddr::new(ip.into(), port)],
@@ -408,5 +421,21 @@ mod tests {
         assert!(parse_target_with_mode("http://hg.localhost/img", false).is_err());
         assert!(parse_target_with_mode("http://ipc.localhost/", false).is_err());
         assert!(parse_target_with_mode("javascript:alert(1)", false).is_err());
+    }
+
+    #[test]
+    fn source_host_is_allowed_on_lan_but_other_private_hosts_stay_blocked() {
+        crate::infra::source::gate_open("http://192.168.77.7:8080").unwrap();
+        // 接入地址所在主机：任意端口、媒体与封面都放行
+        assert!(parse_target_with_mode("http://192.168.77.7:8080/api/edge/request", true).is_ok());
+        assert!(parse_target_with_mode("http://192.168.77.7:9000/media/x.m3u8", true).is_ok());
+        // 其他内网 / 回环地址仍被严格模式拦截
+        assert!(parse_target_with_mode("http://192.168.77.8/", true).is_err());
+        assert!(parse_target_with_mode("http://127.0.0.1/", true).is_err());
+        assert!(parse_target_with_mode("http://10.0.0.1/", true).is_err());
+        // 应用内部协议主机名即使等于接入地址也不放行
+        crate::infra::source::gate_open("http://hg.localhost").unwrap();
+        assert!(parse_target_with_mode("http://hg.localhost/", true).is_err());
+        crate::infra::source::gate_reset();
     }
 }

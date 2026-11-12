@@ -98,8 +98,9 @@ async fn client_for(raw: &str) -> Result<(url::Url, Arc<reqwest::Client>), Strin
 }
 
 async fn client_for_dns(raw: &str, public_dns: bool) -> Result<(url::Url, Arc<reqwest::Client>), String> {
-    let strict = network_policy::strict_security();
-    let target = network_policy::parse_target_with_mode(raw, strict)?;
+    let target = network_policy::parse_target_with_mode(raw, network_policy::strict_security())?;
+    // 接入地址所在主机（自建 NAS / 内网服务）单独按宽松处理，其余目标仍受严格模式约束
+    let strict = network_policy::strict_security() && !network_policy::is_source_host(&target);
     let host = target.host_str().ok_or("目标缺少主机名")?;
     let port = target.port_or_known_default().ok_or("目标端口无效")?;
     let key = format!("{strict}:{host}:{port}:{public_dns}");
