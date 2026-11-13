@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { LANG_NAMES, pickLlmModel, translateWithLlm } from "./translate-llm.mjs";
+import { LANG_NAMES, pickLlmModel, pickSakuraModel, translateWithLlm } from "./translate-llm.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -211,6 +211,7 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
   const TRANSLATE = path.join(HERE, "translate.py");
   // 首选翻译：本地大模型（Qwen2.5-7B + llama-server）；没装就用 NLLB
   const LLM_MODEL = pickLlmModel(path.join(modelsDir, "llm"));
+  const SAKURA_MODEL = pickSakuraModel(path.join(modelsDir, "llm")); // 日译中专用，比通用 Qwen 准；只用于日语
   const dirOf = (id, ep) => path.join(cacheDir, "subs", String(id), String(ep));
   const keyOf = (id, ep) => `${id}/${ep}`;
 
@@ -222,7 +223,7 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
     if (!whisper) missing.push("whisper-cli（brew install whisper-cpp）");
     if (!fs.existsSync(WHISPER_MODEL)) missing.push("语音识别模型");
     const nllb = fs.existsSync(PY) && fs.existsSync(path.join(NLLB_DIR, "model.bin"));
-    const llm = !!LLM_MODEL && !!which("llama-server");
+    const llm = (!!LLM_MODEL || !!SAKURA_MODEL) && !!which("llama-server");
     const translate = nllb || llm;
     return {
       asr: missing.length === 0,
@@ -345,10 +346,12 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
         setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25);
         const texts = toTranslate.map((c) => c.t);
         let zh = new Array(texts.length).fill("");
-        if (caps.llm && (LANG_NAMES[language] || NLLB[language])) {
+        const useSakura = language === "ja" && !!SAKURA_MODEL;
+        const llmModel = useSakura ? SAKURA_MODEL : LLM_MODEL;
+        if (caps.llm && llmModel && (LANG_NAMES[language] || NLLB[language])) {
           try {
             zh = await translateWithLlm({
-              serverBin: which("llama-server"), model: LLM_MODEL, texts, lang: language, env,
+              serverBin: which("llama-server"), model: llmModel, style: useSakura ? "sakura" : "qwen", texts, lang: language, env,
               onProgress: (f) => setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25, f),
               onProc: (p) => { job.proc = p; }, isCancelled: () => job.cancelled,
             });

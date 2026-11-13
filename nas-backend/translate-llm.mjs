@@ -26,6 +26,23 @@ export function pickLlmModel(dir, env = process.env, list = (d) => { try { retur
   return wanted ? path.join(dir, wanted) : null;
 }
 
+/** 日译中专用模型 Sakura（SakuraLLM，Qwen2.5-7B 微调）。只做日语，其它语言仍用上面的通用 Qwen。 */
+export function pickSakuraModel(dir, env = process.env, list = (d) => { try { return fs.readdirSync(d); } catch { return []; } }) {
+  const f = list(dir).find((x) => /^sakura-7b-qwen2\.5.*\.gguf$/i.test(x));
+  return f && !env.NO_SAKURA ? path.join(dir, f) : null;
+}
+
+const SAKURA_SYSTEM = "你是一个轻小说翻译模型，可以流畅通顺地以日本轻小说的风格将日文翻译成简体中文，并联系上下文正确使用人称代词，不擅自添加原文中没有的代词。";
+/** Sakura 的提问：一行一条台词，前面带上几条已译的台词作为上下文（回答里对应的几行丢掉） */
+export function sakuraUser(lines, ctxLines = []) {
+  return "将下面的日文文本翻译成中文：\n" + [...ctxLines, ...lines].join("\n");
+}
+/** Sakura 的回答按行对齐；行数对不上返回 null（调用方改成逐条问） */
+export function parseSakura(text, n, ctxN = 0) {
+  const got = String(text || "").trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return got.length === n + ctxN ? got.slice(ctxN) : null;
+}
+
 export function systemPrompt(lang) {
   const name = LANG_NAMES[lang] || `语言代码 ${lang}`;
   return `你是专业的${name}译中字幕翻译。输入是一部影片按时间顺序的台词，大多是口语。` +
@@ -82,7 +99,7 @@ async function waitHealthy(port, proc, timeoutMs) {
  * @param {{ serverBin: string, model: string, texts: string[], lang: string, env?: object,
  *           onProgress?: (f:number)=>void, onProc?: (p:any)=>void, isCancelled?: ()=>boolean }} o
  */
-export async function translateWithLlm({ serverBin, model, texts, lang, env, onProgress, onProc, isCancelled }) {
+export async function translateWithLlm({ serverBin, model, texts, lang, env, style = "qwen", onProgress, onProc, isCancelled }) {
   const port = 20000 + Math.floor(Math.random() * 20000);
   const proc = spawn(serverBin, ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui"],
     { env: env || process.env, stdio: "ignore" });
@@ -90,17 +107,25 @@ export async function translateWithLlm({ serverBin, model, texts, lang, env, onP
   const out = new Array(texts.length).fill("");
   try {
     await waitHealthy(port, proc, 180_000);
-    const ask = async (lines, context) => {
+    const chat = async (system, user) => {
       const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: [{ role: "system", content: systemPrompt(lang) }, { role: "user", content: userPrompt(lines, context) }],
-          temperature: 0.2, max_tokens: 1536,
-        }),
+        body: JSON.stringify({ messages: [{ role: "system", content: system }, { role: "user", content: user }], temperature: 0.2, max_tokens: 1536 }),
       });
       if (!res.ok) throw new Error(`llama-server HTTP ${res.status}`);
-      const j = await res.json();
-      return parseNumbered(j.choices?.[0]?.message?.content, lines.length);
+      return (await res.json()).choices?.[0]?.message?.content;
+    };
+    const ask = async (lines, context) => {
+      if (style === "sakura") {
+        const ctxSrc = context.map((c) => c.t);
+        const whole = parseSakura(await chat(SAKURA_SYSTEM, sakuraUser(lines, ctxSrc)), lines.length, ctxSrc.length);
+        if (whole) return whole;
+        // 行数对不上（模型合并 / 拆分了台词）：改成逐条问，慢一点但不会错位
+        const single = [];
+        for (const t of lines) single.push((parseSakura(await chat(SAKURA_SYSTEM, sakuraUser([t])), 1) || [""])[0]);
+        return single;
+      }
+      return parseNumbered(await chat(systemPrompt(lang), userPrompt(lines, context)), lines.length);
     };
     const idx = texts.map((t, i) => i).filter((i) => texts[i] && texts[i].trim());
     let done = 0;

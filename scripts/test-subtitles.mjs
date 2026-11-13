@@ -152,3 +152,14 @@ test("LLM 翻译：编号解析、可用性判断、模型挑选", async () => {
   assert.equal(pickLlmModel("/m", {}, () => ["x.bin"]), null);
   assert.match(userPrompt(["ダメ!"], [{ t: "はい", z: "好的" }]), /前文[\s\S]*はい → 好的[\s\S]*1\. ダメ!/);
 });
+
+test("Sakura（日译中专用）：提问格式、按行解析、行数对不上返回 null、模型挑选", async () => {
+  const { sakuraUser, parseSakura, pickSakuraModel } = await import("../nas-backend/translate-llm.mjs");
+  assert.equal(sakuraUser(["ダメ!", "はい"], ["すごい"]), "将下面的日文文本翻译成中文：\nすごい\nダメ!\nはい");
+  assert.deepEqual(parseSakura("真棒\n不行！\n好的\n", 2, 1), ["不行！", "好的"]); // 前 1 行是上下文
+  assert.equal(parseSakura("不行！好的", 2, 0), null); // 合并成一行 → 对不上
+  const files = ["qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", "sakura-7b-qwen2.5-v1.0-iq4xs.gguf"];
+  assert.equal(pickSakuraModel("/m", {}, () => files), "/m/sakura-7b-qwen2.5-v1.0-iq4xs.gguf");
+  assert.equal(pickSakuraModel("/m", { NO_SAKURA: "1" }, () => files), null);
+  assert.equal(pickSakuraModel("/m", {}, () => ["x.gguf"]), null);
+});
