@@ -78,7 +78,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 ] }
 
 [profile.release]
-panic = "abort"
+# 不能用 panic = "abort"：wry 给 WebView 回复自定义协议（hg://）数据时，靠 objc2::exception::catch 接住
+# WebKit 对“已被取消的请求”抛出的 Objective-C 异常（点进度条 / 拖动时播放器会取消在途请求）。
+# abort 模式下 catch 接不住，异常会直接让整个进程中止（崩溃栈：try_objc_execute_closure → panic_cannot_unwind）。
+panic = "unwind"
 codegen-units = 1
 lto = true
 opt-level = "s"
