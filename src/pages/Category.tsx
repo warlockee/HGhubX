@@ -12,7 +12,7 @@ type Channel = { cate: string; name: string };
 
 /* ================= 分类总览 ================= */
 export default function Category({ wide, active }: { wide: boolean; active: boolean }) {
-  const { push, lineEpoch } = useStore();
+  const { push, lineEpoch, libraryEpoch } = useStore();
   const [rows, setRows] = useState<Record<string, VideoCard[]>>({});
   const [channels, setChannels] = useState<Channel[]>([]);
   const [totals, setTotals] = useState<Record<string, number>>({});
@@ -87,6 +87,13 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
     started.current = true;
     void loadChannels();
   }, [active, loadChannels]);
+
+  /* 片库有增删：已经打开过分类页的话，重新拿分类和各分类的预览（数量、封面都会变） */
+  useEffect(() => {
+    if (!libraryEpoch || !started.current) return;
+    void loadChannels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryEpoch]);
 
   /* 线路切换后：已打开过的分类里，加载失败的栏目在新线路上重试一次 */
   useEffect(() => {

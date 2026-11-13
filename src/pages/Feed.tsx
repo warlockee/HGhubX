@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, cover, fmt, fmtTime, isMobile, logLine, mediaUrl, warmMedia } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
@@ -133,6 +133,22 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const pinchRef = useRef<{ d0: number; mx0: number; my0: number; s0: number; x0: number; y0: number } | null>(null);
 
   const curId = videoIds[index];
+
+  /* 列表在播放中被换掉（片库刷新：剔除已删除的、追加新增的）：按 id 找回当前视频，别让画面跳到别的视频。
+     只在中间有元素被剔除、位置发生了移动时才需要；末尾追加不影响。 */
+  const prevIdsRef = useRef(videoIds);
+  useLayoutEffect(() => {
+    if (prevIdsRef.current === videoIds) return;
+    const oldId = prevIdsRef.current[index];
+    prevIdsRef.current = videoIds;
+    if (videoIds[index] === oldId) return;
+    const found = videoIds.indexOf(oldId);
+    const target = found >= 0 ? found : Math.max(0, Math.min(index, videoIds.length - 1)); // 当前这条本身被删了：停在原位置附近
+    idxRef.current = target;
+    setIndex(target);
+    const el = boxRef.current;
+    if (el) el.scrollTo({ top: target * (el.clientHeight || 1), behavior: "instant" as ScrollBehavior });
+  }, [videoIds]);
   const detail = details[curId];
   const curEp = epMap[curId] || 1;
   const playKey = episodeKey(curId, curEp);

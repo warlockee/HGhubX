@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Feed from "./Feed";
 import { api } from "../api";
+import { libraryApi } from "../library";
 import type { VideoCard } from "../types";
 import { useStore } from "../store";
 import { ISearch } from "../icons";
@@ -17,7 +18,7 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 export default function Home({ active, bottomInset }: { active: boolean; bottomInset: number }) {
-  const { toast, lineEpoch } = useStore();
+  const { toast, lineEpoch, libraryEpoch, gate } = useStore();
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -83,6 +84,28 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
     void load(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lineEpoch]);
+
+  /* 片库有增删：剔除已经不存在的视频、把新增的补到末尾。
+     只追加 / 剔除，不重排也不重置，Feed 会按 id 找回当前视频，不打断正在播放的内容。 */
+  useEffect(() => {
+    if (!libraryEpoch || !itemsRef.current.length || !gate.base) return;
+    let alive = true;
+    (async () => {
+      try {
+        const [{ ids: live }, fresh] = await Promise.all([libraryApi.ids(gate.base), api.feed(1, 30)]);
+        if (!alive) return;
+        const exist = new Set(live);
+        setItems((prev) => {
+          const kept = prev.filter((v) => exist.has(v.id));
+          const seen = new Set(kept.map((v) => v.id));
+          const added = (fresh?.items || []).filter((v) => exist.has(v.id) && !seen.has(v.id));
+          return kept.length === prev.length && !added.length ? prev : [...kept, ...added];
+        });
+      } catch { /* 暂时取不到就等下一次 */ }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryEpoch]);
 
   const ids = items.map((v) => v.id);
 

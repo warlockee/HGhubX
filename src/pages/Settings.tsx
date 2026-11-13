@@ -15,7 +15,8 @@ import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRe
 /* 独立设置页：接入地址 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, preferHevc, setPreferHevc, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast, gate, nas } = useStore();
+  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, preferHevc, setPreferHevc, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast, gate, nas, refreshLibrary } = useStore();
+  const [libBusy, setLibBusy] = useState(false);
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -159,6 +160,15 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                 </div>
                 <IChevR size={15} className="text-mut" />
               </button>
+              <div className="flex items-center gap-3 px-3.5 py-3">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] text-on">刷新片库</div>
+                  <div className="text-[10.5px] text-mut">每 5 分钟自动检查一次新增 / 删除的视频；也可以现在重扫</div>
+                </div>
+                <button disabled={libBusy || nas.state !== "ready"}
+                  onClick={() => { setLibBusy(true); refreshLibrary().then((r) => toast(r ? (r.changed ? `片库已更新 · 共 ${r.count} 个视频` : `片库没有变化 · 共 ${r.count} 个视频`) : "刷新失败", r ? "ok" : "info")).finally(() => setLibBusy(false)); }}
+                  className="px-3 h-8 rounded-(--r-ctl) bg-s3 text-[12px] text-on pressable disabled:opacity-50">{libBusy ? "扫描中…" : "立即刷新"}</button>
+              </div>
             </Section>
           )}
 

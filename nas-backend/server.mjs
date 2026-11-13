@@ -85,23 +85,42 @@ async function walk(dir, rel, out) {
   await Promise.all(jobs);
 }
 
-let LIBRARY = { list: [], byId: new Map(), categories: [] };
-let scanning = false;
-async function scan() {
-  if (scanning) return;
-  scanning = true;
-  const t0 = Date.now();
-  try {
-    const found = [];
-    await walk(MEDIA_DIR, [], found);
-    const used = new Set();
-    found.sort((a, b) => b.mtime - a.mtime || collator.compare(a.title, b.title));
-    for (const v of found) { while (used.has(v.id)) v.id++; used.add(v.id); }
-    const cats = new Map();
-    for (const v of found) { const c = cats.get(v.category) || { name: v.category, count: 0, latest: 0 }; c.count++; c.latest = Math.max(c.latest, v.mtime); cats.set(v.category, c); }
-    LIBRARY = { list: found, byId: new Map(found.map((v) => [v.id, v])), categories: [...cats.values()].sort((a, b) => b.latest - a.latest) };
-    console.log(`[scan] ${found.length} 个视频 / ${cats.size} 个分类 @ ${MEDIA_DIR} (${Date.now() - t0}ms)`);
-  } finally { scanning = false; }
+let LIBRARY = { list: [], byId: new Map(), categories: [], version: "", scannedAt: 0 };
+let scanning = null;
+let suspect = 0; // 连续几次扫描结果异常（骤降）
+const libraryVersion = (list) => crypto.createHash("sha1").update(list.map((v) => v.id).sort((a, b) => a - b).join(",")).digest("hex").slice(0, 12);
+const libraryStatus = () => ({ version: LIBRARY.version, count: LIBRARY.list.length, categories: LIBRARY.categories.length, scannedAt: LIBRARY.scannedAt, scanning: !!scanning });
+
+/** 扫描片库。同时只跑一个；正在扫时返回同一个 Promise。
+ *  网络盘暂时断开 / 某个子目录读不出来时，扫描结果会是空的或骤降——这种情况保留旧片库，连续两次都这样才接受。 */
+function scan() {
+  if (scanning) return scanning;
+  scanning = (async () => {
+    const t0 = Date.now();
+    try {
+      await fsp.access(MEDIA_DIR); // 根目录读不到（共享没挂载）直接抛错，保留旧片库
+      const found = [];
+      await walk(MEDIA_DIR, [], found);
+      const prev = LIBRARY.list.length;
+      if (prev > 0 && (found.length === 0 || found.length < prev * 0.5) && suspect < 1) {
+        suspect++;
+        console.warn(`[scan] 结果异常（${prev} → ${found.length}），可能是网络盘暂时不可用，先保留旧片库，下次再确认`);
+        return;
+      }
+      suspect = 0;
+      const used = new Set();
+      found.sort((a, b) => b.mtime - a.mtime || collator.compare(a.title, b.title));
+      for (const v of found) { while (used.has(v.id)) v.id++; used.add(v.id); }
+      const cats = new Map();
+      for (const v of found) { const c = cats.get(v.category) || { name: v.category, count: 0, latest: 0 }; c.count++; c.latest = Math.max(c.latest, v.mtime); cats.set(v.category, c); }
+      const before = LIBRARY.version;
+      LIBRARY = { list: found, byId: new Map(found.map((v) => [v.id, v])), categories: [...cats.values()].sort((a, b) => b.latest - a.latest), version: libraryVersion(found), scannedAt: Date.now() };
+      console.log(`[scan] ${found.length} 个视频 / ${cats.size} 个分类 @ ${MEDIA_DIR} (${Date.now() - t0}ms)${before && before !== LIBRARY.version ? "，片库有变化" : ""}`);
+    } catch (e) {
+      console.warn(`[scan] 失败，保留旧片库：${e.message || e}`);
+    } finally { scanning = null; }
+  })();
+  return scanning;
 }
 
 /* ───────────── ffprobe（结果持久化到磁盘，重启后不用再读网络盘） ───────────── */
@@ -450,6 +469,10 @@ const server = http.createServer(async (req, res) => {
       const isList = m[3].endsWith(".m3u8");
       return sendFile(req, res, file, isList ? "application/vnd.apple.mpegurl" : "video/mp2t", { "Cache-Control": isList ? "no-store" : "public, max-age=86400, immutable" });
     }
+    // 片库接口（GET + JSON）：客户端定期查 status，version 变了就刷新列表；ids 用来剔除已经不存在的视频
+    if (url.pathname === "/library/status") return sendJson(res, libraryStatus());
+    if (url.pathname === "/library/ids") return sendJson(res, { version: LIBRARY.version, ids: LIBRARY.list.map((v) => v.id) });
+    if (url.pathname === "/library/refresh") { await scan(); return sendJson(res, libraryStatus()); }
     // 字幕接口：全是 GET + JSON，客户端经本地代理 /seg 访问
     if (url.pathname === "/sub/capabilities") return sendJson(res, subs.capabilities());
     if ((m = url.pathname.match(/^\/sub\/(\d+)\/(\d+)\/(status|start|cancel|remove|cues\.json)$/))) {
@@ -488,7 +511,7 @@ if (process.env.HGHUBX_PARENT_PID) {
 }
 
 await scan();
-setInterval(() => scan().catch(console.error), 30 * 60 * 1000).unref(); // 网络盘上不监听目录变化，只定时重扫
+setInterval(() => scan().catch(console.error), 5 * 60 * 1000).unref(); // 网络盘上不监听目录变化，只定时重扫（5 分钟；扫描只读目录，不影响播放）
 evictSoon();
 prewarm().catch(console.error);
 server.listen(PORT, "0.0.0.0", () => console.log(`[http] 监听 0.0.0.0:${PORT}，客户端接入地址填 http://<本机IP>:${PORT}`));

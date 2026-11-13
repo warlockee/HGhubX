@@ -12,7 +12,7 @@ export function useAppShellStore() {
     gate: s.gate, gateReady: s.gateReady, gateBusy: s.gateBusy, gateError: s.gateError,
     activateGate: s.activateGate, resetGate: s.resetGate,
     toast: s.toast, toasts: s.toasts,
-    lineEpoch: s.lineEpoch,
+    lineEpoch: s.lineEpoch, libraryEpoch: s.libraryEpoch, refreshLibrary: s.refreshLibrary,
     strictSecurity: s.strictSecurity, strictSecurityReady: s.strictSecurityReady,
     securityPending: s.securityPending, cliRelaxed: s.cliRelaxed, setStrictSecurity: s.setStrictSecurity,
   };

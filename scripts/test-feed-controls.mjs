@@ -141,6 +141,24 @@ try {
   }
   await page.evaluate(() => document.activeElement && document.activeElement.blur());
 
+  // ── 片库刷新：列表在播放中被换掉，当前视频必须按 id 找回，不能跳到别的视频 ──
+  const counter = async () => (await page.locator(".desktop-browse-inline small").first().textContent()).trim();
+  const feedBox = await page.evaluateHandle(() => [...document.querySelectorAll("div")].find((d) => getComputedStyle(d).overflowY !== "visible" && d.scrollHeight > d.clientHeight + 50 && d.clientHeight > 500));
+  const scrollOf = () => feedBox.evaluate((el) => Math.round(el.scrollTop / el.clientHeight));
+  await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+  await page.keyboard.press("PageDown"); await settle(900);       // 看第 2 个：102
+  assert.equal(await counter(), "02 / 03", "先切到第 2 个");
+  await page.evaluate(() => window.__setIds([100, 101, 102, 103])); await settle(500);   // 前面新增了一个：102 变成第 3 个
+  assert.equal(await counter(), "03 / 04", "前面插入 1 个后仍停在 102（第 3 个）");
+  assert.equal(await scrollOf(), 2, "滚动位置同步到 102 的新位置");
+  await page.evaluate(() => window.__setIds([102, 103, 104])); await settle(500);       // 前面的都被删了、后面新增：102 变成第 1 个
+  assert.equal(await counter(), "01 / 03", "前面的被剔除后仍停在 102（第 1 个）");
+  assert.equal(await scrollOf(), 0, "滚动位置回到顶部");
+  await page.evaluate(() => window.__setIds([102, 103, 104, 105])); await settle(500);  // 只在末尾追加：什么都不该动
+  assert.equal(await counter(), "01 / 04", "末尾追加不影响当前位置");
+  await page.evaluate(() => window.__setIds([103, 104, 105])); await settle(500);       // 当前这条自己被删了：停在原位置附近，不崩
+  assert.equal(await counter(), "01 / 03", "当前视频被删除后停在原位置附近");
+
   assert.deepEqual(pageErrors, [], "页面不应有未捕获异常");
   console.log("feed-controls: all checks passed");
 } finally {

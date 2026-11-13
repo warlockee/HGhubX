@@ -4,6 +4,7 @@ import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity, setSiteBa
 import { appDataKey } from "../branding";
 import type { BootInfo, GateState, NasStatus, User } from "../types";
 import type { SubMode } from "../subtitles";
+import { libraryApi, LIBRARY_POLL_MS } from "../library";
 
 export type Platform = "android" | "ios" | "windows" | "macos" | "linux";
 export type Theme = "dark" | "light";
@@ -167,6 +168,10 @@ type Store = {
   toasts: Toast[]; toast: (msg: string, icon?: Toast["icon"]) => void;
   /** 接入地址（门牌）切换计数：变了就让列表页重挂载，重新拉一遍数据 */
   lineEpoch: number;
+  /** 片库变化计数：NAS 片库的视频有增删（定期检查 / 手动刷新发现）就加一，列表页据此刷新 */
+  libraryEpoch: number;
+  /** 立即让后端重扫片库并刷新列表；不支持的数据源返回 null */
+  refreshLibrary: () => Promise<{ count: number; changed: boolean } | null>;
   /** 门牌：未激活时只显示 SourceGate，不拉业务数据 */
   gate: GateState; gateReady: boolean; gateBusy: boolean; gateError: string;
   activateGate: (address: string) => Promise<void>;
@@ -193,6 +198,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [lineEpoch, setLineEpoch] = useState(0);
+  const [libraryEpoch, setLibraryEpoch] = useState(0);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
   const [clean, setCleanState] = useState(false);
@@ -345,6 +351,43 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2200);
   }, []);
 
+  /* 定期检查片库有没有变化：后端每 5 分钟重扫一次，前端每分钟（以及窗口回到前台时）问一次版本号，
+     变了就弹提示并让列表页刷新。只对内置 NAS 这类有 /library 接口的数据源生效，取不到就停止轮询。 */
+  const libVersion = useRef("");
+  const checkLibrary = useCallback(async (base: string, refresh = false) => {
+    const st = await (refresh ? libraryApi.refresh(base) : libraryApi.status(base));
+    const changed = !!libVersion.current && !!st.version && st.version !== libVersion.current;
+    const delta = st.count - (Number(libCount.current) || st.count);
+    libCount.current = st.count;
+    libVersion.current = st.version;
+    if (changed) {
+      setLibraryEpoch((e) => e + 1);
+      if (!refresh) toast(`片库已更新 · 共 ${st.count} 个视频${delta ? `（${delta > 0 ? "+" : "−"}${Math.abs(delta)}）` : ""}`, "ok");
+    }
+    return { count: st.count, changed };
+  }, [toast]);
+  const libCount = useRef(0);
+  useEffect(() => {
+    libVersion.current = ""; libCount.current = 0;
+    if (!gate.activated || !gate.base) return;
+    const base = gate.base;
+    let alive = true, supported = true, timer = 0;
+    const tick = () => {
+      if (!alive || !supported || document.hidden) return;
+      checkLibrary(base).catch((e) => { if (/HTTP 404/.test((e as Error).message || "")) supported = false; /* 其它错误（暂时不通）下次再试 */ });
+    };
+    tick();
+    timer = window.setInterval(tick, LIBRARY_POLL_MS);
+    const onVisible = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { alive = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [gate.activated, gate.base, checkLibrary]);
+  const refreshLibrary = useCallback(async () => {
+    if (!gate.activated || !gate.base) return null;
+    try { return await checkLibrary(gate.base, true); } catch { return null; }
+  }, [gate.activated, gate.base, checkLibrary]);
+
+
 
   const setTab = useCallback((t: Tab) => { setTabRaw(t); setStack([]); }, []);
   const push = useCallback((pg: PageInput) => {
@@ -455,13 +498,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     preferHevc: p.preferHevc, setPreferHevc,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
-    toasts, toast, lineEpoch,
+    toasts, toast, lineEpoch, libraryEpoch, refreshLibrary,
     gate, gateReady, gateBusy, gateError, activateGate, resetGate,
     nas, nasLoaded, configureNas, restartNas,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setMuteOnStartup, setSwipeEp, setSubMode, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
-    toasts, toast, lineEpoch, theater, setTheater, fs, setFs, clean, setClean,
+    toasts, toast, lineEpoch, libraryEpoch, refreshLibrary, theater, setTheater, fs, setFs, clean, setClean,
     gate, gateReady, gateBusy, gateError, activateGate, resetGate, nas, nasLoaded, configureNas, restartNas]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

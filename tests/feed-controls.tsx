@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import Feed from "../src/pages/Feed";
 import { AppProvider } from "../src/store";
@@ -36,10 +36,19 @@ Object.assign(window, {
   },
 });
 
+/** 测试可以从外部换掉列表（模拟片库刷新：剔除已删除的、追加新增的） */
+function Host() {
+  const [ids, setIds] = useState([101, 102, 103]);
+  (window as unknown as { __setIds: (v: number[]) => void }).__setIds = setIds;
+  return (
+    <div style={{ position: "relative", width: 1200, height: 780 }}>
+      <Feed videoIds={ids} mode="context" active bottomInset={0} />
+    </div>
+  );
+}
+
 createRoot(document.querySelector("#root")!).render(
   <AppProvider>
-    <div style={{ position: "relative", width: 1200, height: 780 }}>
-      <Feed videoIds={[101, 102, 103]} mode="context" active bottomInset={0} />
-    </div>
+    <Host />
   </AppProvider>,
 );

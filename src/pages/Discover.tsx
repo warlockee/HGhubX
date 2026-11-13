@@ -170,7 +170,7 @@ export function TopicPage({ slug, name, onBack, wide }: { slug: string; name: st
 
 /* ================= 标签聚合页 ================= */
 export function TagsPage({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { push, toast } = useStore();
+  const { push, toast, libraryEpoch } = useStore();
   const [searching, setSearching] = useState(false);
   const [groups, setGroups] = useState<TagGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -186,6 +186,7 @@ export function TagsPage({ onBack, wide }: { onBack: () => void; wide: boolean }
   }, [toast]);
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { if (libraryEpoch) load(); /* 片库有变化：重新取标签 */ /* eslint-disable-next-line */ }, [libraryEpoch]);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
