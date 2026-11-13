@@ -134,3 +134,21 @@ test("合并：对白优先，与对白重叠的补充字幕丢弃，结果按�
   for (let i = 1; i < out.length; i++) assert.ok(out[i].s >= out[i - 1].e);
   assert.ok(out[2].e - out[2].s >= 0.6);
 });
+
+test("LLM 翻译：编号解析、可用性判断、模型挑选", async () => {
+  const { parseNumbered, usable, pickLlmModel, userPrompt } = await import("../nas-backend/translate-llm.mjs");
+  assert.deepEqual(parseNumbered("1. 再来一次\n2、不行！\n4. 好的\n废话", 4), ["再来一次", "不行！", "", "好的"]);
+  assert.deepEqual(parseNumbered("1. “真的吗？”\n1. 重复的第二个", 2), ["真的吗？", ""]); // 引号去掉；重复编号只取第一个
+  assert.ok(usable("ダメ!", "不行！", "ja"));
+  assert.ok(!usable("ダメ!", "", "ja"));
+  assert.ok(!usable("ダメ!", "ダメ!", "ja")); // 原样抄回
+  assert.ok(!usable("すごい", "すごいね", "ja")); // 译文里还有假名
+  assert.ok(!usable("マジなの?", "serious吗？", "ja")); // 夹英文单词
+  assert.ok(usable("OK?", "OK吗？", "en"));
+  assert.ok(usable("¿Qué?", "什么？", "es"));
+  assert.ok(!usable("Hola", "Hola", "es"));
+  const files = ["a.bin", "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"];
+  assert.equal(pickLlmModel("/m", {}, () => files), "/m/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"); // 多分片取第一片
+  assert.equal(pickLlmModel("/m", {}, () => ["x.bin"]), null);
+  assert.match(userPrompt(["ダメ!"], [{ t: "はい", z: "好的" }]), /前文[\s\S]*はい → 好的[\s\S]*1\. ダメ!/);
+});

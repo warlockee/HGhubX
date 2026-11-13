@@ -50,7 +50,8 @@
     "resources": {
       "../nas-backend/server.mjs": "nas-backend/server.mjs",
       "../nas-backend/subtitles.mjs": "nas-backend/subtitles.mjs",
-      "../nas-backend/translate.py": "nas-backend/translate.py"
+      "../nas-backend/translate.py": "nas-backend/translate.py",
+      "../nas-backend/translate-llm.mjs": "nas-backend/translate-llm.mjs"
     }
   }
 }

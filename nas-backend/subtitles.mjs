@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { LANG_NAMES, pickLlmModel, translateWithLlm } from "./translate-llm.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -208,6 +209,8 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
   const PY = path.join(modelsDir, "venv/bin/python");
   const NLLB_DIR = path.join(modelsDir, "nllb");
   const TRANSLATE = path.join(HERE, "translate.py");
+  // 首选翻译：本地大模型（Qwen2.5-7B + llama-server）；没装就用 NLLB
+  const LLM_MODEL = pickLlmModel(path.join(modelsDir, "llm"));
   const dirOf = (id, ep) => path.join(cacheDir, "subs", String(id), String(ep));
   const keyOf = (id, ep) => `${id}/${ep}`;
 
@@ -218,12 +221,15 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
     const missing = [];
     if (!whisper) missing.push("whisper-cli（brew install whisper-cpp）");
     if (!fs.existsSync(WHISPER_MODEL)) missing.push("语音识别模型");
-    const translate = fs.existsSync(PY) && fs.existsSync(path.join(NLLB_DIR, "model.bin"));
+    const nllb = fs.existsSync(PY) && fs.existsSync(path.join(NLLB_DIR, "model.bin"));
+    const llm = !!LLM_MODEL && !!which("llama-server");
+    const translate = nllb || llm;
     return {
       asr: missing.length === 0,
       model: path.basename(WHISPER_MODEL),
       vad: fs.existsSync(VAD_MODEL),
       translate,
+      llm,
       missing,
       note: missing.length ? "运行 nas-backend/setup-subtitles.sh 安装字幕组件" : translate ? "" : "未安装翻译组件，只能生成原文字幕",
     };
@@ -330,21 +336,43 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
         if (lang !== "auto" && !result.result?.language && job.requestLang === "auto") job.language = lang;
       }
 
-      // 3) 合并对白与补充识别的字幕，再翻译成中文（中文原片不用翻；已带中文行的呻吟类字幕不翻；没装翻译组件或不支持的语言只给原文）
+      // 3) 合并对白与补充识别的字幕，再翻译成中文（中文原片不用翻；已带中文行的呻吟类字幕不翻；没装翻译组件时只给原文）
+      //    首选本地大模型（懂口语和上下文），没装或失败时回退到 NLLB
       const finalCues = mergeCues(list, extra);
       const toTranslate = finalCues.filter((c) => !c.z);
       let translated = false, note = "";
-      if (toTranslate.length && language !== "zh" && NLLB[language] && caps.translate) {
+      if (toTranslate.length && language !== "zh" && caps.translate) {
         setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25);
-        const stdout = await exec(job, PY, [TRANSLATE, NLLB_DIR, NLLB[language], "zho_Hans"], {
-          input: JSON.stringify(toTranslate.map((c) => c.t)),
-          onErr: (l) => { const f = parseTranslateProgress(l); if (f != null) setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25, f); },
-        });
-        const zh = JSON.parse(stdout);
+        const texts = toTranslate.map((c) => c.t);
+        let zh = new Array(texts.length).fill("");
+        if (caps.llm && (LANG_NAMES[language] || NLLB[language])) {
+          try {
+            zh = await translateWithLlm({
+              serverBin: which("llama-server"), model: LLM_MODEL, texts, lang: language, env,
+              onProgress: (f) => setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25, f),
+              onProc: (p) => { job.proc = p; }, isCancelled: () => job.cancelled,
+            });
+          } catch (e) {
+            if (job.cancelled) throw e;
+            console.error("[sub] 本地大模型翻译失败，回退到 NLLB：", e.message || e);
+          }
+        }
+        // 大模型没翻出来的条目（或没装大模型）用 NLLB 补
+        const rest = texts.map((t, i) => i).filter((i) => !zh[i]);
+        if (rest.length && NLLB[language] && fs.existsSync(PY) && fs.existsSync(path.join(NLLB_DIR, "model.bin"))) {
+          const stdout = await exec(job, PY, [TRANSLATE, NLLB_DIR, NLLB[language], "zho_Hans"], {
+            input: JSON.stringify(rest.map((i) => texts[i])),
+            onErr: (l) => { const f = parseTranslateProgress(l); if (f != null) setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25, f); },
+          });
+          const nz = JSON.parse(stdout);
+          rest.forEach((i, k) => { if (nz[k]) zh[i] = nz[k]; });
+        }
         toTranslate.forEach((c, i) => { if (zh[i]) c.z = zh[i]; });
-        translated = true;
+        translated = finalCues.some((c) => c.z);
+        if (!translated) note = "翻译失败，仅有原文字幕";
+        else if (toTranslate.some((c) => !c.z)) note = "部分台词没有翻译出来，显示原文";
       } else if (language !== "zh") {
-        note = !NLLB[language] ? "该语言暂不支持翻译，仅有原文字幕" : !caps.translate ? "未安装翻译组件，仅有原文字幕" : "";
+        note = !caps.translate ? "未安装翻译组件，仅有原文字幕" : "";
         if (finalCues.some((c) => c.z)) translated = true; // 呻吟类字幕自带中文行
       }
       if (!finalCues.length) note = "没有识别到对白（片中可能只有音乐、环境声等非语言声音）";
