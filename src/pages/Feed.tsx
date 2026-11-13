@@ -517,7 +517,11 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     if (!active || controlsLocked) return;
     const fn = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      // 只在真正输入文字时放行。滑块（进度 / 音量）点过之后会一直拿着焦点，
+      // 如果也放行，方向键就变成滑块自己的原生步进，上下键不再调音量、左右键步长也和划动不一致。
+      const typing = !!t && (t.isContentEditable || t.tagName === "TEXTAREA"
+        || (t.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes((t as HTMLInputElement).type)));
+      if (typing) return;
       if (subOpen) { if (e.key === "Escape") setSubOpen(false); return; }
       if (panel) { if (e.key === "Escape") setPanel(null); return; }
       switch (e.key) {

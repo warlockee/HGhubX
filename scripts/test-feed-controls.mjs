@@ -125,6 +125,22 @@ try {
   assert.equal(await scrollTop(), 0, "纵向滚轮不再切换视频");
   assert.match(await osd(), /音量 \d+%|静音/, "滚轮音量提示（OSD）");
 
+  // 滑块（进度 / 音量）拿着焦点时，方向键也必须照常工作（以前会被滑块自己的原生步进吃掉）
+  for (const label of ["播放进度", "音量"]) {
+    await page.focus(`input[aria-label="${label}"]`);
+    const v0 = (await vs()), vBase = v0.vol;
+    await page.keyboard.press("ArrowDown"); await settle(200);
+    near((await vs()).vol, Math.max(0, vBase - 0.05), 0.011, `焦点在「${label}」滑块上：↓ 仍然调小音量`);
+    await page.keyboard.press("ArrowUp"); await settle(200);
+    near((await vs()).vol, vBase, 0.011, `焦点在「${label}」滑块上：↑ 仍然调大音量`);
+    near((await vs()).t, v0.t, 1, `焦点在「${label}」滑块上：↑↓ 不应该拖动进度`);
+    await page.keyboard.press("ArrowRight"); await settle(600);
+    near((await vs()).t, v0.t + 5, 1.5, `焦点在「${label}」滑块上：→ 仍然是 +5 秒`);
+    await page.keyboard.press("ArrowLeft"); await settle(600);
+    near((await vs()).t, v0.t, 1.5, `焦点在「${label}」滑块上：← 仍然是 −5 秒`);
+  }
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+
   assert.deepEqual(pageErrors, [], "页面不应有未捕获异常");
   console.log("feed-controls: all checks passed");
 } finally {
