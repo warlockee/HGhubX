@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { LANG_NAMES, pickLlmModel, pickSakuraModel, translateWithLlm } from "./translate-llm.mjs";
+import { LANG_NAMES, memoryFits, memoryStatus, pickLlmModel, pickSakuraModel, translateWithLlm } from "./translate-llm.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -264,7 +264,8 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
   /** 跑一个子进程，逐行回调 stdout / stderr；被取消或非 0 退出时抛错 */
   function exec(job, cmd, args, { onOut, onErr, input } = {}) {
     return new Promise((resolve, reject) => {
-      const p = spawn(cmd, args, { env, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
+      // 降低优先级（nice 会直接 exec 成目标程序，pid 不变，取消时照常 kill）：字幕生成再吃力也让着正在播放的视频
+      const p = spawn("nice", ["-n", "10", cmd, ...args], { env, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
       job.proc = p;
       let stdout = "", errTail = "";
       const lines = (cb) => { let buf = ""; return (d) => { buf += d; let i; while ((i = buf.search(/[\r\n]/)) >= 0) { cb(buf.slice(0, i)); buf = buf.slice(i + 1); } }; };
@@ -348,7 +349,13 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
         let zh = new Array(texts.length).fill("");
         const useSakura = language === "ja" && !!SAKURA_MODEL;
         const llmModel = useSakura ? SAKURA_MODEL : LLM_MODEL;
+        let lowMemory = false;
         if (caps.llm && llmModel && (LANG_NAMES[language] || NLLB[language])) {
+          const mem = memoryStatus();
+          lowMemory = !memoryFits(mem, fs.statSync(llmModel).size);
+          if (lowMemory) console.error(`[sub] 内存不足（可回收 ${Math.round(mem.availMB)}MB，交换区剩 ${Math.round(mem.swapFreeMB)}MB），不装载大模型，改用 NLLB`);
+        }
+        if (caps.llm && llmModel && !lowMemory && (LANG_NAMES[language] || NLLB[language])) {
           try {
             zh = await translateWithLlm({
               serverBin: which("llama-server"), model: llmModel, style: useSakura ? "sakura" : "qwen", texts, lang: language, env,
@@ -374,6 +381,7 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
         translated = finalCues.some((c) => c.z);
         if (!translated) note = "翻译失败，仅有原文字幕";
         else if (toTranslate.some((c) => !c.z)) note = "部分台词没有翻译出来，显示原文";
+        else if (lowMemory) note = "内存不足，已改用轻量翻译（质量较低）；关闭其它应用后点“重新生成”可用本地大模型翻译";
       } else if (language !== "zh") {
         note = !caps.translate ? "未安装翻译组件，仅有原文字幕" : "";
         if (finalCues.some((c) => c.z)) translated = true; // 呻吟类字幕自带中文行

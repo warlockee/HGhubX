@@ -163,3 +163,19 @@ test("Sakura（日译中专用）：提问格式、按行解析、行数对不�
   assert.equal(pickSakuraModel("/m", { NO_SAKURA: "1" }, () => files), null);
   assert.equal(pickSakuraModel("/m", {}, () => ["x.gguf"]), null);
 });
+
+test("内存检查：解析 vm_stat / 交换区，内存不足时不装大模型", async () => {
+  const { parseVmStat, parseSwapFree, memoryFits, memoryStatus } = await import("../nas-backend/translate-llm.mjs");
+  const vm = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                     4262.\nPages active:                                 161804.\nPages inactive:                               159322.\nPages speculative:                              1535.\nPages purgeable:                                1693.\n";
+  assert.ok(Math.abs(parseVmStat(vm) - ((4262 + 159322 + 1535 + 1693) * 16384) / 1048576) < 1e-6);
+  assert.equal(parseSwapFree("vm.swapusage: total = 6144.00M  used = 5490.38M  free = 653.62M  (encrypted)"), 653.62);
+  assert.equal(parseSwapFree("vm.swapusage: total = 2.00G  used = 0.50G  free = 1.50G"), 1536);
+  const model = 4.2 * 1024 ** 3;
+  assert.ok(!memoryFits({ availMB: 2600, swapFreeMB: 650 }, model)); // 崩溃那次的状态
+  assert.ok(!memoryFits({ availMB: 9000, swapFreeMB: 650 }, model)); // 内存够但交换区快满
+  assert.ok(!memoryFits({ availMB: 4000, swapFreeMB: 4000 }, model)); // 可回收内存不够装模型 + 余量
+  assert.ok(memoryFits({ availMB: 5600, swapFreeMB: 3000 }, model));
+  assert.ok(memoryFits({ availMB: 100, swapFreeMB: 0 }, model, { FORCE_LLM: "1" })); // 强制
+  const mem = memoryStatus((cmd) => (cmd === "vm_stat" ? vm : "vm.swapusage: total = 6144.00M  used = 5490.38M  free = 653.62M"));
+  assert.ok(process.platform !== "darwin" || (mem.swapFreeMB === 653.62 && mem.availMB > 2000));
+});

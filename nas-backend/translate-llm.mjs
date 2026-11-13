@@ -4,7 +4,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import os from "node:os";
+import { spawn, execFileSync } from "node:child_process";
 
 /** whisper 语言码 → 提示词里用的中文语言名；没有的用代码本身 */
 export const LANG_NAMES = {
@@ -101,7 +102,7 @@ async function waitHealthy(port, proc, timeoutMs) {
  */
 export async function translateWithLlm({ serverBin, model, texts, lang, env, style = "qwen", onProgress, onProc, isCancelled }) {
   const port = 20000 + Math.floor(Math.random() * 20000);
-  const proc = spawn(serverBin, ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui"],
+  const proc = spawn("nice", ["-n", "10", serverBin, "-m", model, "--host", "127.0.0.1", "--port", String(port), "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui"],
     { env: env || process.env, stdio: "ignore" });
   onProc?.(proc);
   const out = new Array(texts.length).fill("");
@@ -149,4 +150,32 @@ export async function translateWithLlm({ serverBin, model, texts, lang, env, sty
     try { proc.kill("SIGKILL"); } catch { /* 已退出 */ }
     onProc?.(null);
   }
+}
+
+/* ───────────── 内存检查 ─────────────
+ * 7B 模型约 4～5GB。8GB 的机器本来就紧（还要同时放视频、浏览器），再硬塞进去会把系统挤进疯狂换页，
+ * 看片时的自定义协议响应分配失败 → 应用崩溃。所以开跑之前先看内存，不够就退回轻量的 NLLB。 */
+
+/** macOS `vm_stat` 输出 → 可回收内存（MB）：空闲 + 不活跃 + 预留 + 可清除 */
+export function parseVmStat(text) {
+  const size = Number(/page size of (\d+) bytes/.exec(text)?.[1] || 16384);
+  const pages = (name) => Number(new RegExp(`Pages ${name}:\\s+(\\d+)`).exec(text)?.[1] || 0);
+  return ((pages("free") + pages("inactive") + pages("speculative") + pages("purgeable")) * size) / 1048576;
+}
+/** macOS `sysctl vm.swapusage` 输出 → 交换区剩余（MB） */
+export function parseSwapFree(text) {
+  const m = /free = ([\d.]+)([MG])/.exec(text);
+  return m ? Number(m[1]) * (m[2] === "G" ? 1024 : 1) : Infinity;
+}
+/** 当前可用内存与交换区余量（MB）。读不到（非 macOS 等）时用 os.freemem 估计、交换区视为充足。 */
+export function memoryStatus(run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 3000 })) {
+  try {
+    if (process.platform === "darwin") return { availMB: parseVmStat(run("vm_stat", [])), swapFreeMB: parseSwapFree(run("sysctl", ["vm.swapusage"])) };
+  } catch { /* 落到下面 */ }
+  return { availMB: os.freemem() / 1048576, swapFreeMB: Infinity };
+}
+/** 能不能放心装下模型：可回收内存 ≥ 模型大小 + 1GB 余量，且交换区还剩 1.5GB 以上 */
+export function memoryFits(mem, modelBytes, env = process.env) {
+  if (env.FORCE_LLM) return true;
+  return mem.availMB >= modelBytes / 1048576 + 1024 && mem.swapFreeMB >= 1536;
 }
