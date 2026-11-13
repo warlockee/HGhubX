@@ -11,7 +11,12 @@ import {
 
 const appWindow = () => getCurrentWindow();
 
-export function DesktopTitleBar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+import { nextRailMode as _n, type RailMode } from "../railMode";
+export type { RailMode };
+export const nextRailMode = _n;
+const RAIL_NEXT_LABEL: Record<RailMode, string> = { full: "收成图标条", compact: "完全隐藏侧栏", hidden: "展开侧栏" };
+
+export function DesktopTitleBar({ railMode, onToggle }: { railMode: RailMode; onToggle: () => void }) {
   const { theme, setTheme, setTab, platform } = useStore();
   const [maxed, setMaxed] = useState(false);
   /* macOS 原生全屏：红绿灯被系统隐藏，标题栏左侧 84px 让位要收回（见 index.css） */
@@ -36,7 +41,7 @@ export function DesktopTitleBar({ collapsed, onToggle }: { collapsed: boolean; o
         <Logo size={24} />
         <span>HG<span className="win-wordmark-light">hub</span><span className="text-primary">X</span></span>
       </div>
-      <button className="win-caption-tool" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} onClick={onToggle}>
+      <button className="win-caption-tool" aria-label={RAIL_NEXT_LABEL[railMode]} title={`${RAIL_NEXT_LABEL[railMode]}（⌘/Ctrl+B 隐藏或恢复）`} onClick={onToggle}>
         <ISidebar size={17} strokeWidth={1.7} />
       </button>
       <div className="win-drag-region" data-tauri-drag-region />

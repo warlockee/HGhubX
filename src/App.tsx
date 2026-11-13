@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
 import { isMobile, selfTest } from "./api";
-import { exitApp, logLine, setTextInteraction } from "./platform";
+import { exitApp, isWindowFullscreen, logLine, onWindowResized, setTextInteraction, setWindowFullscreen } from "./platform";
 import { addPluginListener } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
@@ -18,6 +18,7 @@ import SourceGate from "./components/SourceGate";
 import NasSplash from "./components/NasSplash";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
+import { nextRailMode, parseRailMode, toggleHidden, type RailMode } from "./railMode";
 import ResizeHandles from "./components/ResizeHandles";
 import { tracePlayback } from "./player/diagnostics";
 import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF, Logo } from "./icons";
@@ -146,7 +147,7 @@ function AppBody() {
         return;
       }
       if (loginOpen) { if (e.key === "Escape") setLoginOpen(false); return; }
-      if (e.key === "Escape") { if (stack.length) pop(); return; }
+      if (e.key === "Escape") { if (!fs && stack.length) pop(); return; } // 全屏时 Esc 只用来退出全屏（播放页自己处理）
       if (e.key === "/") { e.preventDefault(); setTab("search"); return; }
       if (["1", "2", "3", "4"].includes(e.key) && !e.repeat) {
         setTab((["home", "search", "category", "profile"] as Tab[])[Number(e.key) - 1]);
@@ -154,7 +155,7 @@ function AppBody() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [stack.length, pop, setTab, loginOpen, setLoginOpen]);
+  }, [stack.length, pop, setTab, loginOpen, setLoginOpen, fs]);
 
   const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
@@ -186,23 +187,62 @@ function AppBody() {
 }
 
 /* ============ 桌面窗口壳（Windows / macOS / Linux）============ */
+const RAIL_KEY = "hghubx_rail_mode";
+const readRailMode = (): RailMode => { try { return parseRailMode(localStorage.getItem(RAIL_KEY)); } catch { return "full"; } };
+
 function DesktopShell() {
-  const [collapsed, setCollapsed] = useState(false);
-  const { theater, platform } = useStore();
+  const [railMode, setRailMode] = useState<RailMode>(readRailMode);
+  const lastShown = useRef<RailMode>("full"); // Cmd/Ctrl+B 恢复时回到隐藏前的样子
+  const { theater, platform, fs, setFs } = useStore();
+  const fsRef = useRef(fs); fsRef.current = fs;
+  useEffect(() => { try { localStorage.setItem(RAIL_KEY, railMode); } catch { /* ignore */ } }, [railMode]);
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "b") return;
+      const t = e.target as HTMLElement;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      setRailMode((m) => { const [next, remember] = toggleHidden(m, lastShown.current); lastShown.current = remember; return next; });
+    };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, []);
+  /* 用户用系统方式退出了窗口全屏（绿色按钮 / Cmd+Ctrl+F），界面也要退出沉浸模式，否则标题栏和侧栏会一直藏着。
+     系统全屏有过渡动画，期间窗口可能短暂报告“不在全屏”：必须先确认进入过全屏，之后又不在了，才算外部退出。 */
+  const seenFs = useRef(false);
+  useEffect(() => { if (!fs) seenFs.current = false; }, [fs]);
+  useEffect(() => {
+    let un: (() => void) | undefined, alive = true;
+    onWindowResized(() => {
+      if (!fsRef.current) return;
+      isWindowFullscreen().then((on) => {
+        if (!alive) return;
+        if (on) seenFs.current = true;
+        else if (seenFs.current && fsRef.current) { seenFs.current = false; setFs(false); }
+      });
+    }).then((f) => { if (alive) un = f; else f(); });
+    return () => { alive = false; un?.(); };
+  }, [setFs]);
+  /* 应用退出沉浸模式（Esc / 按钮 / 离开播放页）时，窗口也退出全屏；已经不在全屏就什么都不做 */
+  const wasFs = useRef(false);
+  useEffect(() => {
+    if (wasFs.current && !fs) void setWindowFullscreen(false);
+    wasFs.current = fs;
+  }, [fs]);
   return (
     <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${platform}`}>
-      <DesktopTitleBar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      {!fs && <DesktopTitleBar railMode={railMode} onToggle={() => setRailMode((m) => { const n = nextRailMode(m); if (n !== "hidden") lastShown.current = n; return n; })} />}
       <div className="relative flex-1 min-h-0">
-        <ShellInner collapsed={collapsed || theater} theater={theater} />
+        <ShellInner collapsed={railMode === "compact" || theater} hideRail={railMode === "hidden" || theater || fs} theater={theater || fs} />
       </div>
       {/* 边缘缩放热区只对无边框窗口（Windows / Linux）有效，macOS 走原生窗口边框 */}
-      {(platform === "windows" || platform === "linux") && <ResizeHandles />}
+      {!fs && (platform === "windows" || platform === "linux") && <ResizeHandles />}
     </div>
   );
 }
 
-function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boolean }) {
-  const { stack, pop, loginOpen, setLoginOpen, tab, setTab, platform } = useStore();
+function ShellInner({ collapsed, hideRail, theater }: { collapsed: boolean; hideRail: boolean; theater: boolean }) {
+  const { stack, pop, loginOpen, setLoginOpen, tab, setTab, platform, fs } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(true);
 
@@ -238,7 +278,7 @@ function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boole
 
   return (
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
-      {!theater && <DesktopRail collapsed={collapsed} />}
+      {!hideRail && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className={`relative flex-1 min-w-0 overflow-hidden win-main ${theater ? "is-theater-main" : ""}`}>
         <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>

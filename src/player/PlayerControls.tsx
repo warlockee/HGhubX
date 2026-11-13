@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTime } from "../api";
 import { useSeekInput } from "./diagnostics";
-import { ICheck, ICompress, IExpand, ILockF, INext, IPrev, IPauseF, IPip, IPlayF, ICaptions, ITheater, IVol, IVolMute } from "../icons";
+import { ICheck, ICompress, IExpand, ILockF, INext, IPrev, IPauseF, IPlayF, ICaptions, ITheater, IVol, IVolMute } from "../icons";
 
 type Props = {
   paused: boolean;
@@ -29,7 +29,6 @@ type Props = {
   onRate: (r: number) => void;
   onMute: () => void;
   onVolume: (v: number) => void;
-  onPip: () => void;
   onLock: () => void;
   onTheater?: () => void;
   onFullscreen: () => void;
@@ -41,7 +40,7 @@ const clock = (s: number) => fmtTime(Math.max(0, s || 0)).padStart(5, "0");
 
 export default function PlayerControls({
   paused, time, duration, buffered = 0, rate, muted, volume, theater = false, fullscreen = false,
-  visible = true, seekEnabled = true, seekKey, prevDisabled = false, prevTitle = "上一个", nextDisabled = false, nextTitle = "下一个", subtitle, onSubtitle, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onPrev, onNext,
+  visible = true, seekEnabled = true, seekKey, prevDisabled = false, prevTitle = "上一个", nextDisabled = false, nextTitle = "下一个", subtitle, onSubtitle, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onLock, onTheater, onFullscreen, onPrev, onNext,
 }: Props) {
   const [speedOpen, setSpeedOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -114,7 +113,6 @@ export default function PlayerControls({
               onChange={(e) => onVolume(Number(e.target.value))} />
           </div>
         </div>
-        <button className="player-control" aria-label="画中画" data-tooltip="画中画" onClick={onPip}><IPip size={20} strokeWidth={1.6} /></button>
         <button className="player-control" aria-label="锁定播放控制" aria-pressed={false} data-tooltip="锁定播放控制" onClick={onLock}><ILockF size={18} /></button>
         {!fullscreen && onTheater && (
           <button className={`player-control ${theater ? "is-on" : ""}`} aria-label="影院模式" aria-pressed={theater}

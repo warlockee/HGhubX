@@ -159,6 +159,24 @@ try {
   await page.evaluate(() => window.__setIds([103, 104, 105])); await settle(500);       // 当前这条自己被删了：停在原位置附近，不崩
   assert.equal(await counter(), "01 / 03", "当前视频被删除后停在原位置附近");
 
+  // ── 全屏：应用请求窗口级全屏并进入沉浸模式（隐藏右侧栏），Esc / 再按 F 退出 ──
+  await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+  assert.ok(await page.locator(".desktop-social").count() > 0, "全屏前右侧操作栏在");
+  assert.equal(await page.locator('.player-control[aria-label="全屏"]').count(), 1, "控制条里有全屏按钮");
+  await page.keyboard.press("f"); await settle(300);
+  assert.deepEqual(await page.evaluate(() => window.__fsCalls), [true], "按 F 请求窗口全屏");
+  assert.equal(await page.locator('.player-control[aria-label="退出全屏"]').count(), 1, "全屏后按钮变成退出全屏");
+  assert.equal(await page.locator(".desktop-social").count(), 0, "全屏时隐藏右侧操作栏（沉浸）");
+  await page.keyboard.press("Escape"); await settle(300);
+  assert.deepEqual(await page.evaluate(() => window.__fsCalls), [true, false], "Esc 退出沉浸模式，并请求窗口退出全屏");
+  assert.equal(await page.locator('.player-control[aria-label="全屏"]').count(), 1, "Esc 后回到非全屏");
+  await page.locator('.player-control[aria-label="全屏"]').click(); await settle(300);
+  assert.equal(await page.locator('.player-control[aria-label="退出全屏"]').count(), 1, "点按钮同样进入全屏");
+  await page.locator('.player-control[aria-label="退出全屏"]').click(); await settle(300);
+  assert.equal(await page.locator('.player-control[aria-label="全屏"]').count(), 1, "点按钮退出全屏");
+  assert.deepEqual(await page.evaluate(() => window.__fsCalls), [true, false, true, false], "窗口全屏请求序列：进、出、进、出");
+  assert.equal(await page.locator('.player-control[aria-label="画中画"]').count(), 0, "画中画按钮已去掉");
+
   assert.deepEqual(pageErrors, [], "页面不应有未捕获异常");
   console.log("feed-controls: all checks passed");
 } finally {

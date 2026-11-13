@@ -16,11 +16,16 @@ const empty = { items: [], pagination: { page: 1, pages: 0, size: 20, total: 0 }
 
 Object.assign(window, {
   __TAURI_INTERNALS__: {
+    metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
     transformCallback: () => 1,
     invoke(cmd: string, args: Record<string, unknown> = {}) {
       if (cmd === "gate_state") return Promise.resolve({ base: "http://fixture.invalid/", adapter: "edge_v1", activated: true });
       if (cmd === "app_boot") return Promise.resolve({ user: null, logged_in: false, base: "http://fixture.invalid/" });
       if (cmd === "debug_log") return Promise.resolve();
+      // 窗口全屏：记录调用，测试据此确认应用确实请求了窗口级全屏
+      if (cmd === "plugin:window|set_fullscreen") { ((window as unknown as { __fsCalls?: boolean[] }).__fsCalls ||= []).push(Boolean(args.value)); return Promise.resolve(); }
+      if (cmd === "plugin:window|is_fullscreen") return Promise.resolve(false);
+      if (cmd === "plugin:event|listen") return Promise.resolve(1);
       if (cmd === "data_call") {
         const c = (args.command || {}) as Record<string, unknown>;
         switch (c.cmd) {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   GateState,
   NasStatus,
@@ -40,3 +41,17 @@ export const nasConfigure = (enabled: boolean, mediaDir: string, port?: number) 
 export const nasRestart = () => invoke<NasStatus>("nas_restart");
 export const onNasStatus = (fn: (s: NasStatus) => void): Promise<UnlistenFn> =>
   listen<NasStatus>("nas-status", (e) => fn(e.payload));
+
+/** 桌面窗口全屏开关（应用自己控制，不依赖网页的 requestFullscreen——它在 WebView 里没有可靠效果）。失败只记日志，不抛出。 */
+export const setWindowFullscreen = async (on: boolean): Promise<void> => {
+  try { await getCurrentWindow().setFullscreen(on); }
+  catch (e) { void logLine(`[fullscreen] setFullscreen(${on}) failed: ${String(e)}`); }
+};
+/** 窗口当前是否处于全屏（用户用系统方式退出全屏时，界面要跟着退出沉浸模式） */
+export const isWindowFullscreen = async (): Promise<boolean> => {
+  try { return await getCurrentWindow().isFullscreen(); } catch { return false; }
+};
+/** 窗口尺寸 / 全屏状态变化的订阅；订阅不了就返回空的取消函数 */
+export const onWindowResized = async (cb: () => void): Promise<UnlistenFn> => {
+  try { return await getCurrentWindow().onResized(cb); } catch { return () => {}; }
+};

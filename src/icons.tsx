@@ -68,7 +68,6 @@ export const IMinus = S(<path d="M5 12h14" />);
 export const ISquare = S(<rect x="5.5" y="5.5" width="13" height="13" rx="1.5" />);
 export const IRotate = S(<><rect x="7" y="3.5" width="10" height="17" rx="2.2" /><path d="M2.5 9A9.8 9.8 0 0 1 5 5.5M21.5 15a9.8 9.8 0 0 1-2.5 3.5" /></>);
 export const IHist = S(<><path d="M3.8 12a8.2 8.2 0 1 1 2.4 5.8" /><path d="M3.5 13.5 3.8 17l3.4-.5" /><path d="M12 7.5v4.7l3.2 1.9" /></>);
-export const IPip = S(<><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><rect x="12" y="12" width="6.5" height="4.8" rx="1.2" fill="currentColor" stroke="none" /></>);
 
 export const ISidebar = S(<><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></>);
 export const IChevronUp = S(<path d="m6 14 6-6 6 6" />);

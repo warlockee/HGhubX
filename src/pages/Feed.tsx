@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { api, cover, fmt, fmtTime, isMobile, logLine, mediaUrl, warmMedia } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
+import { setWindowFullscreen } from "../platform";
 import { Avatar, Img, Sheet } from "../components/ui";
 import VideoSurface, { type VideoHandle } from "../player/VideoSurface";
 import PlayerControls from "../player/PlayerControls";
@@ -99,7 +100,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   useEffect(() => {
     if (paused) { setIdle(false); window.clearTimeout(idleTimer.current); }
   }, [paused]);
-  const [fullscreen, setFullscreen] = useState(false);
   const [heartBurst, setHeartBurst] = useState(0);
   /* —— 移动端手势 —— */
   const [holdSpeed, setHoldSpeed] = useState(false);
@@ -541,6 +541,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       if (subOpen) { if (e.key === "Escape") setSubOpen(false); return; }
       if (panel) { if (e.key === "Escape") setPanel(null); return; }
       switch (e.key) {
+        case "Escape": if (fs) { e.preventDefault(); toggleFull(); } break;
         // 字幕：V 在 关 → 双语 → 中文 → 原文 间切换（还没有字幕就打开菜单）；[ ] 调整字幕快慢
         case "v": case "V":
           if (!subs.supported) break;
@@ -572,7 +573,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, controlsLocked, panel, subOpen, subDone, subDelay, subMode, subs.supported, subs.translated, index, stepDir, seekBy, volumeBy]);
+  }, [active, controlsLocked, panel, subOpen, subDone, subDelay, subMode, subs.supported, subs.translated, index, stepDir, seekBy, volumeBy, fs]);
 
   /* 安卓返回键：面板打开时先关面板 */
   useEffect(() => {
@@ -581,18 +582,18 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     return () => setBackHandler(null);
   }, [panel]);
 
-  useEffect(() => {
-    const onFs = () => setFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFs);
-    return () => document.removeEventListener("fullscreenchange", onFs);
-  }, []);
-
+  /* 桌面全屏：窗口进入系统全屏 + 应用进入沉浸模式（隐藏标题栏、侧栏、右侧栏，只留视频和播放控制）。
+     不用网页的 requestFullscreen：它在 WebView 里没有可靠效果，失败还被静默吞掉。 */
   const toggleFull = () => {
-    const el = boxRef.current?.parentElement;
-    if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
+    if (!isDesktop) return;
+    if (fs) { exitFs(); void setWindowFullscreen(false); }
+    else { enterFs(true); void setWindowFullscreen(true); }
   };
+  /* 离开这个播放页（切标签 / 打开别的页面）时退出全屏，免得整个界面都藏起来回不去 */
+  useEffect(() => {
+    if (isDesktop && !active && fs) { setFs(false); void setWindowFullscreen(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
 
   /* —— 长按 2x（上滑锁定） / 横拖定位 / 单击暂停 —— */
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -927,15 +928,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       setTime(target);
     }
     setBarPct(null);
-  };
-
-  const togglePip = async () => {
-    try {
-      const v = videoRef.current?.el();
-      if (document.pictureInPictureElement) await document.exitPictureInPicture();
-      else if (v && document.pictureInPictureEnabled) await v.requestPictureInPicture();
-      else toast("当前环境不支持画中画", "info");
-    } catch { toast("画中画开启失败", "info"); }
   };
 
   const requireLogin = () => { if (!user) { setLoginOpen(true); return false; } return true; };
@@ -1343,7 +1335,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       {isDesktop && (
         <PlayerControls
           paused={paused} time={time} duration={duration} buffered={buffered} rate={rate}
-          muted={muted} volume={volume} theater={theater} fullscreen={fullscreen}
+          muted={muted} volume={volume} theater={theater} fullscreen={fs}
           visible={active && !idle}
           seekEnabled={active && !controlsLocked}
           seekKey={playKey}
@@ -1359,7 +1351,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           onRate={(r) => { setRate(r); videoRef.current?.rate(r); }}
           onMute={() => setMuted((m) => !m)}
           onVolume={(v) => setVolume(v)}
-          onPip={togglePip}
           onLock={lockControls}
           onTheater={() => setTheater((v) => !v)}
           onFullscreen={toggleFull}
