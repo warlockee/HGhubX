@@ -1,7 +1,7 @@
 // 字幕后处理的单元测试（纯逻辑，不需要 whisper / 翻译模型）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cleanCues, parseTranslateProgress, parseWhisperProgress, sentencesFromWhisper } from "../nas-backend/subtitles.mjs";
+import { WHISPER_MODELS, WHISPER_VAD_ARGS, cleanCues, parseTranslateProgress, parseWhisperProgress, pickWhisperModel, sentencesFromWhisper } from "../nas-backend/subtitles.mjs";
 
 const tok = (text, from, to) => ({ text, offsets: { from, to } });
 
@@ -76,4 +76,20 @@ test("进度解析", () => {
   assert.equal(parseWhisperProgress("other"), null);
   assert.equal(parseTranslateProgress("PROGRESS 8/16"), 0.5);
   assert.equal(parseTranslateProgress("hello"), null);
+});
+
+test("识别模型：优先 large-v3，没有就回退 turbo，环境变量可强制指定", () => {
+  const has = (...names) => (p) => names.some((n) => p.endsWith(n));
+  assert.equal(pickWhisperModel("/m", {}, has("ggml-large-v3-q5_0.bin", "ggml-large-v3-turbo-q5_0.bin")), "ggml-large-v3-q5_0.bin");
+  assert.equal(pickWhisperModel("/m", {}, has("ggml-large-v3-turbo-q5_0.bin")), "ggml-large-v3-turbo-q5_0.bin", "老安装只有 turbo：回退");
+  assert.equal(pickWhisperModel("/m", {}, has()), WHISPER_MODELS[0], "都没有：指向首选，由能力探测报缺失");
+  assert.equal(pickWhisperModel("/m", { WHISPER_MODEL: "x.bin" }, has("x.bin", "ggml-large-v3-q5_0.bin")), "x.bin");
+});
+
+test("静音检测参数：实测调优值（阈值 0.3、补边 200ms、最短人声 100ms）", () => {
+  const a = WHISPER_VAD_ARGS;
+  const val = (flag) => a[a.indexOf(flag) + 1];
+  assert.equal(val("--vad-threshold"), "0.3");
+  assert.equal(val("--vad-speech-pad-ms"), "200");
+  assert.equal(val("--vad-min-speech-duration-ms"), "100");
 });

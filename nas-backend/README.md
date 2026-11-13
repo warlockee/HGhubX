@@ -35,13 +35,19 @@ HGhubX 桌面端内置了对这个后端的托管：「设置 → 本机 NAS 服
 ## 字幕生成（日语 / 西班牙语等外语片）
 播放页的 **CC 按钮**（快捷键 `V`）→ 选视频里说的语言 → 生成字幕。**全程在本机运行，音频和台词都不会发到外部服务。**
 
-流程：ffmpeg 抽音频 → whisper.cpp 识别（Metal 加速，带静音检测，识别 99 种语言）→ 按句拆分、过滤“幻听” → NLLB 翻译成中文 → 缓存到 `cache/subs/`。
-在 M2 上，一部 69 分钟的影片约 1 分钟完成；生成期间可以继续观看，完成后自动显示，并提示“字幕已生成”。
+流程：ffmpeg 抽音频 → whisper.cpp 识别（`large-v3`，Metal 加速，带静音检测，识别 99 种语言）→ 按句拆分、过滤“幻听” → NLLB 翻译成中文 → 缓存到 `cache/subs/`。
+在 M2 上，一部 69 分钟的影片约 2 分钟完成；生成期间可以继续观看，完成后自动显示，并提示“字幕已生成”。
 
-- **安装组件**（一次性，约 2.5GB）：`./setup-subtitles.sh`。装 whisper.cpp（brew）、识别模型 `large-v3-turbo`、静音检测模型、Python 环境与翻译模型 NLLB-200 1.3B，默认放在 `~/Library/Application Support/com.hghubx.app/nas-cache/models`（与应用托管的后端一致）。没装时 CC 按钮里会提示。
+- **安装组件**（一次性，约 3GB）：`./setup-subtitles.sh`。装 whisper.cpp（brew）、识别模型 `large-v3-turbo`、静音检测模型、Python 环境与翻译模型 NLLB-200 1.3B，默认放在 `~/Library/Application Support/com.hghubx.app/nas-cache/models`（与应用托管的后端一致）。没装时 CC 按钮里会提示。
 - **显示模式**：关闭 / 中文 / 原文 / 双语；`V` 循环切换，`[` `]` 调整字幕快慢（每次 0.5 秒）。
 - **语言**：自动识别在开头是音乐或没人说话时可能判错，已知语言时建议直接选。非英语片里孤零零的 “Thank you” 等常见幻听会被过滤。
 - 未安装翻译组件或语言暂不支持翻译时，只生成原文字幕。
+- **日语识别准确度（实测）**：用 ReazonSpeech（日本电视节目真实对话，带背景音乐与音效，有人工标注）前 50 条、读音级字错误率（越低越好）：
+  turbo 18.2% → large-v3 16.9% → **large-v3 + 调灵敏的静音检测 14.0%（当前采用）**。
+  静音检测默认阈值 0.5 会漏掉带背景音的短台词，调成阈值 0.3、两侧补 200ms、最短人声 100ms（见 `subtitles.mjs` 的 `WHISPER_VAD_ARGS`）；再调灵敏到 0.2 反而变差。
+  试过但没采用：关闭上下文（更差 17.7%）、音量动态归一化（更差 19.5%）、日语提示词（无差别）、放宽无语音阈值（无差别）。
+  `kotoba-whisper-v2.0`（日语专用）逐条短音频识别很准（9.6%），但长音频会跳过内容，自己切块后整体并不比 large-v3 好（16.0%），而且要另外维护常驻服务，暂不采用。
+  只装过旧版 turbo 模型的机器会自动回退到 turbo；可用环境变量 `WHISPER_MODEL` 指定模型文件名。
 - 接口（GET + JSON，客户端经本地代理访问）：`/sub/capabilities`、`/sub/<id>/<ep>/status | start?lang=ja | cancel | remove | cues.json`。
 - 可用 `--models-dir` 或环境变量 `MODELS_DIR` 指定组件目录。
 

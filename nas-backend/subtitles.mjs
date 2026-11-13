@@ -101,6 +101,19 @@ export function cleanCues(cues, language) {
   return kept;
 }
 
+/** 识别模型优先级：large-v3（日语等外语明显更准）> turbo（更快但更不准，作为老安装的回退）。
+ *  环境变量 WHISPER_MODEL 可强制指定。 */
+export const WHISPER_MODELS = ["ggml-large-v3-q5_0.bin", "ggml-large-v3-turbo-q5_0.bin"];
+export function pickWhisperModel(modelsDir, env = process.env, exists = fs.existsSync) {
+  const wanted = env.WHISPER_MODEL ? [env.WHISPER_MODEL] : WHISPER_MODELS;
+  return wanted.find((m) => exists(path.join(modelsDir, m))) || wanted[0];
+}
+
+/** whisper-cli 的静音检测（VAD）参数。用 ReazonSpeech（日本电视真实对话）实测调出：
+ *  默认参数（阈值 0.5）会漏掉带背景音乐 / 音效的台词，把阈值降到 0.3、两侧补 200ms 并允许 100ms 的短人声后，
+ *  large-v3 的字错误率从 16.9% 降到 14.0%；再降到 0.2 反而变差（14.8%）。 */
+export const WHISPER_VAD_ARGS = ["--vad-threshold", "0.3", "--vad-speech-pad-ms", "200", "--vad-min-speech-duration-ms", "100"];
+
 export const parseWhisperProgress = (line) => { const m = /progress\s*=\s*(\d+)%/.exec(line); return m ? Number(m[1]) / 100 : null; };
 export const parseTranslateProgress = (line) => { const m = /^PROGRESS (\d+)\/(\d+)/.exec(line); return m && Number(m[2]) ? Number(m[1]) / Number(m[2]) : null; };
 
@@ -112,7 +125,7 @@ export const parseTranslateProgress = (line) => { const m = /^PROGRESS (\d+)\/(\
  */
 export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathEnv }) {
   const env = { ...process.env, PATH: pathEnv || process.env.PATH };
-  const WHISPER_MODEL = path.join(modelsDir, process.env.WHISPER_MODEL || "ggml-large-v3-turbo-q5_0.bin");
+  const WHISPER_MODEL = path.join(modelsDir, pickWhisperModel(modelsDir));
   const VAD_MODEL = path.join(modelsDir, "ggml-silero-v5.1.2.bin");
   const PY = path.join(modelsDir, "venv/bin/python");
   const NLLB_DIR = path.join(modelsDir, "nllb");
@@ -130,6 +143,7 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
     const translate = fs.existsSync(PY) && fs.existsSync(path.join(NLLB_DIR, "model.bin"));
     return {
       asr: missing.length === 0,
+      model: path.basename(WHISPER_MODEL),
       vad: fs.existsSync(VAD_MODEL),
       translate,
       missing,
@@ -205,7 +219,7 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
       setStage(job, "transcribe", "正在识别语音…", 0.1, 0.65);
       const threads = String(Math.max(2, Math.min(8, os.cpus().length - 2)));
       const wargs = ["-m", WHISPER_MODEL, "-f", wav, "-l", job.requestLang, "-ojf", "-of", out, "-t", threads, "-pp", "-sns"];
-      if (caps.vad) wargs.push("--vad", "-vm", VAD_MODEL);
+      if (caps.vad) wargs.push("--vad", "-vm", VAD_MODEL, ...WHISPER_VAD_ARGS);
       await exec(job, "whisper-cli", wargs, { onErr: (l) => { const f = parseWhisperProgress(l); if (f != null) setStage(job, "transcribe", "正在识别语音…", 0.1, 0.65, f); } });
       const result = JSON.parse(await fsp.readFile(out + ".json", "utf8"));
       const language = result.result?.language || (job.requestLang !== "auto" ? job.requestLang : "en");

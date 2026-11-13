@@ -3,11 +3,11 @@
 #   用法：  ./setup-subtitles.sh [模型目录]
 #   默认模型目录与应用托管的后端一致：~/Library/Application Support/com.hghubx.app/nas-cache/models
 # 组件：
-#   whisper.cpp（brew，Metal 加速）+ ggml-large-v3-turbo-q5_0（≈570MB，识别日语 / 西班牙语等 99 种语言）
+#   whisper.cpp（brew，Metal 加速）+ ggml-large-v3-q5_0（≈1.1GB，识别日语 / 西班牙语等 99 种语言；比 turbo 在日语上准得多）
 #   Python venv：ctranslate2 + sentencepiece + huggingface_hub，翻译模型 NLLB-200 distilled 1.3B（int8，≈1.4GB）
 set -eu
 MODELS="${1:-$HOME/Library/Application Support/com.hghubx.app/nas-cache/models}"
-WHISPER_MODEL="${WHISPER_MODEL:-ggml-large-v3-turbo-q5_0.bin}"
+WHISPER_MODEL="${WHISPER_MODEL:-ggml-large-v3-q5_0.bin}"
 NLLB_REPO="${NLLB_REPO:-JustFrederik/nllb-200-distilled-1.3B-ct2-int8}"
 PY="${PYTHON:-python3}"
 mkdir -p "$MODELS"
