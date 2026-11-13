@@ -101,6 +101,84 @@ export function cleanCues(cues, language) {
   return kept;
 }
 
+/* ───────────── 弱人声 / 呻吟 / 叹息 / 拟声词 ─────────────
+ * 对白那遍的静音检测（阈值 0.3）会漏掉音量很小的台词，也会把呻吟当成非人声剔掉。
+ * 所以另外用低阈值（0.1）找出所有有人声的小段，扣掉对白那遍已经覆盖的，把剩下的相邻小段合并成片段，
+ * 逐个单独识别（整段一起识别会被前面的“あああ”带偏成循环），时间用小段在原片里的真实位置。
+ * 整段都是呻吟类发声的，原文压缩成“ああ…”，中文行直接本地给“啊…”（翻译模型会把“あああ”翻成乱码）。 */
+
+/** 低阈值找人声小段（whisper-vad-speech-segments）的参数 */
+export const REGION_VAD_ARGS = ["--vad-threshold", "0.1", "--vad-speech-pad-ms", "300", "--vad-min-speech-duration-ms", "50"];
+
+/** whisper-vad-speech-segments 的输出 → [{s,e}]（秒）。它打印的单位是 1/100 秒。 */
+export function parseVadSegments(text) {
+  const out = [];
+  for (const m of String(text).matchAll(/Speech segment \d+: start = ([\d.]+), end = ([\d.]+)/g)) {
+    const s = Number(m[1]) / 100, e = Number(m[2]) / 100;
+    if (e > s) out.push({ s, e });
+  }
+  return out;
+}
+
+/** 扣掉已有字幕覆盖的小段，把相邻小段（间隔 ≤ gap 秒）合并成不超过 maxLen 秒的片段 */
+export function pendingRegions(regions, covered, { gap = 1.0, maxLen = 12, margin = 0.3 } = {}) {
+  const open = regions.filter((r) => !covered.some((c) => r.s < c.e + margin && r.e > c.s - margin));
+  const out = [];
+  for (const r of open) {
+    const last = out[out.length - 1];
+    if (last && r.s - last.e <= gap && r.e - last.s <= maxLen) last.e = r.e;
+    else out.push({ s: r.s, e: r.e });
+  }
+  return out;
+}
+
+const MOAN_KANA = /^[あぁうぅんっはひふへほおぉアァウゥンッハヒフヘホオォー〜~…・、。,.!！?？♡♥\s]+$/;
+const MOAN_HAN = /^[啊哦嗯唔呃哈哎呀噢哼嘿嘻…～~、。,.!！?？\s]+$/;
+const MOAN_WORD = /^(?:a+h+|a+|o+h+|o{2,}|u+h+|u+m+|m{2,}h*|m+h+m*|h+m+|a+y+|h+a+h*|e+h+|n+g+h*|ha(?:ha)+)$/i;
+
+/** 这段识别文本是不是整段都是呻吟 / 叹息 / 笑声类发声（没有实际词句） */
+export function isMoanText(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (MOAN_KANA.test(t) || MOAN_HAN.test(t)) return /[^\s…・、。,.!！?？♡♥]/.test(t);
+  const words = t.toLowerCase().split(/[\s,.!?…¡¿]+/).filter(Boolean);
+  return words.length > 0 && words.every((w) => MOAN_WORD.test(w));
+}
+
+/** 压缩“あああああ”这类循环：同一个字最多连着 2 个，整句不超过 10 个字，并以省略号收尾 */
+export function condenseMoan(text) {
+  let t = String(text || "").trim();
+  if (/[A-Za-z]/.test(t)) {
+    const words = t.split(/[\s,.!?…]+/).filter(Boolean).slice(0, 3);
+    return words.map((w) => w.replace(/(.)\1{2,}/gi, "$1$1")).join(", ") + "…";
+  }
+  t = t.replace(/[\s、。,.!！?？…・]+/g, "");
+  // “はぁはぁはぁはぁ”这类整句都是同一个短单元的循环：留两遍
+  const unit = /^(.{1,4}?)\1{2,}$/.exec(t);
+  if (unit) return unit[1] + unit[1] + "…";
+  t = t.replace(/(.)\1{2,}/g, "$1$1");
+  if (t.length > 10) t = t.slice(0, 10);
+  return t + "…";
+}
+
+/** 整句都是呻吟类发声的字幕：原文压缩，中文行直接给“啊…”；其它字幕原样返回 */
+export function tagMoans(cues) {
+  return cues.map((c) => (isMoanText(c.t) ? { s: c.s, e: c.e, t: condenseMoan(c.t), z: "啊…" } : c));
+}
+
+/** 把补充识别出来的字幕并进对白字幕：与对白时间重叠的丢掉（对白优先），再排序、修正过短 / 重叠 */
+export function mergeCues(speech, extra) {
+  const margin = 0.3;
+  const free = (m) => !speech.some((c) => m.s < c.e + margin && m.e > c.s - margin);
+  const all = [...speech, ...extra.filter(free)].sort((a, b) => a.s - b.s);
+  for (let i = 0; i < all.length; i++) {
+    const next = all[i + 1];
+    if (all[i].e - all[i].s < 0.6) all[i].e = all[i].s + 0.6;
+    if (next && all[i].e > next.s) all[i].e = Math.max(all[i].s + 0.3, next.s - 0.02);
+  }
+  return all;
+}
+
 /** 识别模型优先级：large-v3（日语等外语明显更准）> turbo（更快但更不准，作为老安装的回退）。
  *  环境变量 WHISPER_MODEL 可强制指定。 */
 export const WHISPER_MODELS = ["ggml-large-v3-q5_0.bin", "ggml-large-v3-turbo-q5_0.bin"];
@@ -216,34 +294,64 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
       });
 
       // 2) 语音识别
-      setStage(job, "transcribe", "正在识别语音…", 0.1, 0.65);
+      setStage(job, "transcribe", "正在识别语音…", 0.1, 0.35);
       const threads = String(Math.max(2, Math.min(8, os.cpus().length - 2)));
       const wargs = ["-m", WHISPER_MODEL, "-f", wav, "-l", job.requestLang, "-ojf", "-of", out, "-t", threads, "-pp", "-sns"];
       if (caps.vad) wargs.push("--vad", "-vm", VAD_MODEL, ...WHISPER_VAD_ARGS);
-      await exec(job, "whisper-cli", wargs, { onErr: (l) => { const f = parseWhisperProgress(l); if (f != null) setStage(job, "transcribe", "正在识别语音…", 0.1, 0.65, f); } });
+      await exec(job, "whisper-cli", wargs, { onErr: (l) => { const f = parseWhisperProgress(l); if (f != null) setStage(job, "transcribe", "正在识别语音…", 0.1, 0.35, f); } });
       const result = JSON.parse(await fsp.readFile(out + ".json", "utf8"));
       const language = result.result?.language || (job.requestLang !== "auto" ? job.requestLang : "en");
       job.language = language;
       const list = cleanCues(sentencesFromWhisper(result.transcription), language);
 
-      // 3) 翻译成中文（中文原片不用翻；没装翻译组件或不支持的语言只给原文）
+      // 2b) 弱人声 / 呻吟 / 拟声词：低阈值找出对白那遍没覆盖的人声小段，逐段单独识别
+      let extra = [], lang = language;
+      if (caps.vad) {
+        const vadOut = await exec(job, "whisper-vad-speech-segments", ["-f", wav, "-vm", VAD_MODEL, ...REGION_VAD_ARGS]).catch(() => "");
+        const todo = pendingRegions(parseVadSegments(vadOut), list);
+        for (let i = 0; i < todo.length; i++) {
+          if (job.cancelled) throw new Error("已取消");
+          setStage(job, "transcribe", "正在识别弱人声 / 呻吟…", 0.45, 0.3, i / todo.length);
+          const r = todo[i], chunk = path.join(dir, "chunk.wav"), cout = path.join(dir, "chunk");
+          try {
+            await exec(job, "ffmpeg", ["-y", "-v", "error", "-ss", String(r.s), "-to", String(r.e), "-i", wav, "-c:a", "pcm_s16le", chunk]);
+            await exec(job, "whisper-cli", ["-m", WHISPER_MODEL, "-f", chunk, "-l", lang, "-ojf", "-of", cout, "-t", threads, "-sns", "-nt"]);
+            const doc = JSON.parse(await fsp.readFile(cout + ".json", "utf8"));
+            if (lang === "auto" && doc.result?.language) lang = doc.result.language; // 对白那遍没识别出语言时，用第一段的检测结果
+            extra.push(...cleanCues(sentencesFromWhisper(doc.transcription), lang).map((c) => ({ ...c, s: c.s + r.s, e: c.e + r.s })));
+          } catch (e) {
+            if (job.cancelled) throw e;
+            console.error(`[sub] 弱人声片段 ${r.s.toFixed(1)}s 识别失败，跳过：`, e.message || e);
+          }
+        }
+        fsp.rm(path.join(dir, "chunk.wav"), { force: true }).catch(() => {});
+        fsp.rm(path.join(dir, "chunk.json"), { force: true }).catch(() => {});
+        extra = tagMoans(extra);
+        if (lang !== "auto" && !result.result?.language && job.requestLang === "auto") job.language = lang;
+      }
+
+      // 3) 合并对白与补充识别的字幕，再翻译成中文（中文原片不用翻；已带中文行的呻吟类字幕不翻；没装翻译组件或不支持的语言只给原文）
+      const finalCues = mergeCues(list, extra);
+      const toTranslate = finalCues.filter((c) => !c.z);
       let translated = false, note = "";
-      if (list.length && language !== "zh" && NLLB[language] && caps.translate) {
+      if (toTranslate.length && language !== "zh" && NLLB[language] && caps.translate) {
         setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25);
         const stdout = await exec(job, PY, [TRANSLATE, NLLB_DIR, NLLB[language], "zho_Hans"], {
-          input: JSON.stringify(list.map((c) => c.t)),
+          input: JSON.stringify(toTranslate.map((c) => c.t)),
           onErr: (l) => { const f = parseTranslateProgress(l); if (f != null) setStage(job, "translate", "正在翻译成中文…", 0.75, 0.25, f); },
         });
         const zh = JSON.parse(stdout);
-        list.forEach((c, i) => { if (zh[i]) c.z = zh[i]; });
+        toTranslate.forEach((c, i) => { if (zh[i]) c.z = zh[i]; });
         translated = true;
       } else if (language !== "zh") {
         note = !NLLB[language] ? "该语言暂不支持翻译，仅有原文字幕" : !caps.translate ? "未安装翻译组件，仅有原文字幕" : "";
+        if (finalCues.some((c) => c.z)) translated = true; // 呻吟类字幕自带中文行
       }
-      const doc = { version: String(Date.now()), language, translated, note, createdAt: new Date().toISOString(), cues: list };
+      if (!finalCues.length) note = "没有识别到对白（片中可能只有音乐、环境声等非语言声音）";
+      const doc = { version: String(Date.now()), language, translated, note, createdAt: new Date().toISOString(), cues: finalCues };
       await fsp.writeFile(path.join(dir, "cues.json.tmp"), JSON.stringify(doc));
       await fsp.rename(path.join(dir, "cues.json.tmp"), path.join(dir, "cues.json"));
-      console.log(`[sub] ${id}/${ep} 完成：${language} ${list.length} 条${translated ? "（已翻译）" : ""}`);
+      console.log(`[sub] ${id}/${ep} 完成：${language} ${finalCues.length} 条（对白 ${list.length}，补充 ${finalCues.length - list.length}）${translated ? "（已翻译）" : ""}`);
     } finally {
       fsp.rm(wav, { force: true }).catch(() => {});
       fsp.rm(out + ".json", { force: true }).catch(() => {});

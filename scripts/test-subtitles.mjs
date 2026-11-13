@@ -93,3 +93,44 @@ test("静音检测参数：实测调优值（阈值 0.3、补边 200ms、最短�
   assert.equal(val("--vad-speech-pad-ms"), "200");
   assert.equal(val("--vad-min-speech-duration-ms"), "100");
 });
+
+test("低阈值人声小段：解析输出、扣掉已覆盖的、合并相邻小段", async () => {
+  const { parseVadSegments, pendingRegions } = await import("../nas-backend/subtitles.mjs");
+  const text = "Detected 4 speech segments:\nSpeech segment 0: start = 104.00, end = 222.00\nSpeech segment 1: start = 293.00, end = 372.00\nSpeech segment 2: start = 1592.00, end = 1697.00\nSpeech segment 3: start = 10319.00, end = 10401.00\n";
+  const r = parseVadSegments(text);
+  assert.deepEqual(r, [{ s: 1.04, e: 2.22 }, { s: 2.93, e: 3.72 }, { s: 15.92, e: 16.97 }, { s: 103.19, e: 104.01 }]);
+  // 前两段间隔 0.71s → 合成一个片段；第三段已被对白覆盖 → 扣掉
+  const todo = pendingRegions(r, [{ s: 15, e: 18 }]);
+  assert.deepEqual(todo, [{ s: 1.04, e: 3.72 }, { s: 103.19, e: 104.01 }]);
+  // 片段不超过 maxLen
+  const long = pendingRegions([{ s: 0, e: 6 }, { s: 6.5, e: 12 }, { s: 12.5, e: 18 }], [], { maxLen: 12 });
+  assert.equal(long.length, 2);
+});
+
+test("呻吟类识别：只认整句都是发声的文本，压缩循环，并带上中文行", async () => {
+  const { isMoanText, condenseMoan, tagMoans } = await import("../nas-backend/subtitles.mjs");
+  assert.ok(isMoanText("ああああああ"));
+  assert.ok(isMoanText("はぁはぁはぁはぁ"));
+  assert.ok(isMoanText("あっ…あぁ、んっ"));
+  assert.ok(isMoanText("Ah, ah, ah! Mmm..."));
+  assert.ok(isMoanText("啊…嗯"));
+  assert.ok(!isMoanText("すごい"));
+  assert.ok(!isMoanText("気持ちいい"));
+  assert.ok(!isMoanText("Yes, ah, come here"));
+  assert.ok(!isMoanText(""));
+  assert.equal(condenseMoan("ああああああああああああ"), "ああ…");
+  assert.equal(condenseMoan("Ah, ah, ah, ah, ah, ah"), "Ah, ah, ah…");
+  const out = tagMoans([{ s: 1, e: 3, t: "はぁはぁはぁはぁはぁはぁ" }, { s: 5, e: 6, t: "ごめんね" }]);
+  assert.deepEqual(out[0], { s: 1, e: 3, t: "はぁはぁ…", z: "啊…" });
+  assert.deepEqual(out[1], { s: 5, e: 6, t: "ごめんね" });
+});
+
+test("合并：对白优先，与对白重叠的补充字幕丢弃，结果按时间排序且不重叠", async () => {
+  const { mergeCues } = await import("../nas-backend/subtitles.mjs");
+  const speech = [{ s: 10, e: 14, t: "こんにちは" }];
+  const extra = [{ s: 2, e: 5, t: "ああ…", z: "啊…" }, { s: 11, e: 13, t: "ああ…", z: "啊…" }, { s: 14.1, e: 16, t: "んっ…", z: "啊…" }, { s: 20, e: 20.2, t: "あ…", z: "啊…" }];
+  const out = mergeCues(speech, extra);
+  assert.deepEqual(out.map((c) => c.s), [2, 10, 20]);
+  for (let i = 1; i < out.length; i++) assert.ok(out[i].s >= out[i - 1].e);
+  assert.ok(out[2].e - out[2].s >= 0.6);
+});

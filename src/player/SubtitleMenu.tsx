@@ -81,6 +81,9 @@ export default function SubtitleMenu({ caps, status, mode, translated, language,
           </>
         ) : status.state === "done" && !regen ? (
           <>
+            {count === 0 && (
+              <div className="text-[12px] text-on mb-2.5 leading-relaxed">没有识别到对白，所以没有字幕可显示。{status.message ? "" : "（片中可能没有人声）"}</div>
+            )}
             <div className="grid grid-cols-4 gap-1.5">
               {MODES.map((m) => {
                 const disabled = !!m.needsZh && !translated;

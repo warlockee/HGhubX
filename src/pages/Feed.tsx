@@ -432,7 +432,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* ── 字幕：本地语音识别 + 翻译（仅内置 NAS 后端提供；其它数据源没有就不显示入口） ── */
   const { gate, subMode, setSubMode } = store;
-  const subs = useSubtitles({ base: gate.base, videoId: curId, ep: curEp, enabled: kind === "video" && active, onDone: () => toast("字幕已生成", "ok") });
+  const subs = useSubtitles({ base: gate.base, videoId: curId, ep: curEp, enabled: kind === "video" && active, onDone: (n) => (n > 0 ? toast("字幕已生成", "ok") : toast("没有识别到对白，没有可显示的字幕", "info")) });
   const [subOpen, setSubOpen] = useState(false);
   const [subDelay, setSubDelay] = useState(0); // 字幕延迟（秒，正 = 字幕晚出现），只对当前这集生效
   useEffect(() => { setSubDelay(0); setSubOpen(false); }, [playKey]);

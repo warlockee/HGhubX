@@ -92,6 +92,17 @@ pub fn run() {
                 network_policy::bind_security(&dir);
                 infra::source::bind(&dir);
                 playback_log::bind(&dir);
+                // 发布版 panic=abort，GUI 应用的 stderr 又看不到：先把 panic 位置和信息记进 debug.log 再中止
+                let panic_dir = dir.clone();
+                let previous = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |info| {
+                    let thread = std::thread::current();
+                    let _ = logging::append_debug(
+                        &panic_dir,
+                        &format!("[panic] thread={} {info}", thread.name().unwrap_or("?")),
+                    );
+                    previous(info);
+                }));
                 // 内置 NAS 服务：启用时在这里（门牌之后）拉起后端，并把门牌指向本机服务
                 nas::init(app.handle(), &dir);
                 let state: tauri::State<Api> = app.state();

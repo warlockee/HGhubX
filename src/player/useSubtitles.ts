@@ -7,7 +7,7 @@ type Options = {
   videoId: number;
   ep: number;
   enabled: boolean;
-  onDone?: () => void;
+  onDone?: (count: number) => void;
 };
 
 const capsCache = new Map<string, SubCaps | null>();
@@ -66,7 +66,7 @@ export function useSubtitles({ base, videoId, ep, enabled, onDone }: Options) {
       subApi.status(base, videoId, ep).then((s) => {
         if (token.current !== forTarget) return;
         setStatus(s);
-        if (s.state === "done" && s.version) { void loadCues(s.version, forTarget); doneRef.current?.(); }
+        if (s.state === "done" && s.version) { void loadCues(s.version, forTarget); doneRef.current?.(s.count ?? 0); }
       }).catch(() => {});
     }, 1500);
     return () => window.clearInterval(timer);
