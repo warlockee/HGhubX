@@ -490,11 +490,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const el = boxRef.current;
     if (!el || !isDesktop || !active || controlsLocked) return;
     const track = createWheelTracker();
-    const g = { seekAcc: 0, timer: 0 };
-    const flush = () => {
-      g.timer = 0;
-      if (Math.abs(g.seekAcc) >= 0.5) { const d = g.seekAcc; g.seekAcc = 0; seekBy(d, "trackpad_swipe"); }
-    };
     const scrollableAncestor = (target: EventTarget | null) => {
       for (let n = target as HTMLElement | null; n && n !== el; n = n.parentElement) {
         if (!(n instanceof HTMLElement)) continue;
@@ -509,16 +504,12 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       e.preventDefault();
       const act = track(e as WheelEvent & { webkitDirectionInvertedFromDevice?: boolean }, performance.now());
       if (!act) return;
-      if (act.kind === "seek") {
-        // 攒一下再统一 seek，别每个滚轮事件都打到播放引擎
-        g.seekAcc += act.seconds;
-        if (!g.timer) g.timer = window.setTimeout(flush, 120);
-      } else {
-        volumeBy(act.delta);
-      }
+      // 横向每凑够一步就是 ±5 秒，和 ←→ 键一致（seekBy 自带连续步进的合并）
+      if (act.kind === "seek") seekBy(act.seconds, "trackpad_swipe");
+      else volumeBy(act.delta);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => { el.removeEventListener("wheel", onWheel); window.clearTimeout(g.timer); };
+    return () => el.removeEventListener("wheel", onWheel);
   }, [isDesktop, active, controlsLocked, seekBy, volumeBy]);
 
   /* 键盘 */
@@ -967,6 +958,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   }
 
   const nextEp = episodes.length ? nextEpisodeNumber(episodes, curEp) : null;
+  const prevEp = episodes.length ? previousEpisodeNumber(episodes, curEp) : null;
 
   return (
     <div
@@ -1335,6 +1327,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           visible={active && !idle}
           seekEnabled={active && !controlsLocked}
           seekKey={playKey}
+          prevDisabled={prevEp == null && index <= 0}
+          prevTitle={prevEp != null ? "上一集" : "上一部 ↑"}
           nextDisabled={nextEp == null && index >= videoIds.length - 1}
           nextTitle={nextEp != null ? "下一集 E" : "下一部 ↓"}
           subtitle={subs.supported && kind === "video" ? { on: subDone && subMode !== "off", busy: subs.status.state === "queued" || subs.status.state === "running" } : undefined}
@@ -1349,6 +1343,10 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
           onLock={lockControls}
           onTheater={() => setTheater((v) => !v)}
           onFullscreen={toggleFull}
+          onPrev={() => {
+            if (prevEp != null) pickEp(prevEp);
+            else go(-1);
+          }}
           onNext={() => {
             if (nextEp != null) pickEp(nextEp);
             else go(1);

@@ -103,10 +103,19 @@ try {
   await page.evaluate(() => { const v = document.querySelector("video"); v.pause(); v.currentTime = 10; });
   await page.waitForFunction(() => !document.querySelector("video").seeking);
   await page.mouse.move(600, 400);
-  await page.mouse.wheel(200, 0); await settle(600);          // 200px × 0.15 = +30 秒
-  near((await vs()).t, 40, 2, "横向滑动 = 快进");
-  await page.mouse.wheel(-100, 0); await settle(600);         // −15 秒
-  near((await vs()).t, 25, 2, "反向横滑 = 快退");
+  await page.mouse.wheel(80, 0); await settle(600);           // 80px = 一步 = +5 秒，与 → 键一样
+  near((await vs()).t, 15, 1.5, "横向滑动一步 = +5 秒");
+  await page.keyboard.press("ArrowRight"); await settle(600);
+  near((await vs()).t, 20, 1.5, "→ 键同样 +5 秒（与划动步长一致）");
+  await page.mouse.wheel(200, 0); await settle(600);          // 200px = 2 步（余量不足第三步）= +10 秒
+  near((await vs()).t, 30, 1.5, "横向滑动按步长累计");
+  await page.mouse.wheel(-100, 0); await settle(600);         // −1 步 = −5 秒
+  near((await vs()).t, 25, 1.5, "反向横滑 = 快退一步");
+  // 底部控制条：上一部 / 下一部成对出现（第一部时「上一部」禁用）
+  const prevBtn = page.locator('.player-control[aria-label="上一部 ↑"]');
+  assert.equal(await prevBtn.count(), 1, "控制条里有「上一部」按钮");
+  assert.equal(await prevBtn.isDisabled(), true, "已经是第一部时「上一部」禁用");
+  assert.equal(await page.locator('.player-control[aria-label^="下一"]').count(), 1, "控制条里有「下一部」按钮");
   const volBefore = (await vs()).vol;
   await page.mouse.wheel(0, -40); await settle(300);          // 向上 40px × 0.0025 = +0.10
   near((await vs()).vol, Math.min(1, volBefore + 0.1), 0.011, "纵向上滑 = 音量加");

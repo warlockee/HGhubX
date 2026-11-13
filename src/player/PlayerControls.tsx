@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTime } from "../api";
 import { useSeekInput } from "./diagnostics";
-import { ICheck, ICompress, IExpand, ILockF, INext, IPauseF, IPip, IPlayF, ICaptions, ITheater, IVol, IVolMute } from "../icons";
+import { ICheck, ICompress, IExpand, ILockF, INext, IPrev, IPauseF, IPip, IPlayF, ICaptions, ITheater, IVol, IVolMute } from "../icons";
 
 type Props = {
   paused: boolean;
@@ -16,6 +16,8 @@ type Props = {
   visible?: boolean;
   seekEnabled?: boolean;
   seekKey?: string;
+  prevDisabled?: boolean;
+  prevTitle?: string;
   nextDisabled?: boolean;
   nextTitle?: string;
   /** 字幕入口：后端支持字幕时才显示；on = 正在显示字幕，busy = 正在生成 */
@@ -31,6 +33,7 @@ type Props = {
   onLock: () => void;
   onTheater?: () => void;
   onFullscreen: () => void;
+  onPrev?: () => void;
   onNext?: () => void;
 };
 
@@ -38,7 +41,7 @@ const clock = (s: number) => fmtTime(Math.max(0, s || 0)).padStart(5, "0");
 
 export default function PlayerControls({
   paused, time, duration, buffered = 0, rate, muted, volume, theater = false, fullscreen = false,
-  visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", subtitle, onSubtitle, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext,
+  visible = true, seekEnabled = true, seekKey, prevDisabled = false, prevTitle = "上一个", nextDisabled = false, nextTitle = "下一个", subtitle, onSubtitle, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onPrev, onNext,
 }: Props) {
   const [speedOpen, setSpeedOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -68,6 +71,11 @@ export default function PlayerControls({
         <button className="player-control primary-play" aria-label={paused ? "播放" : "暂停"} data-tooltip={paused ? "播放 Space" : "暂停 Space"} onClick={onToggle}>
           {paused ? <IPlayF size={19} /> : <IPauseF size={18} />}
         </button>
+        {onPrev && (
+          <button className="player-control" aria-label={prevTitle} data-tooltip={prevTitle} disabled={prevDisabled} onClick={onPrev}>
+            <IPrev size={18} strokeWidth={1.7} />
+          </button>
+        )}
         {onNext && (
           <button className="player-control" aria-label={nextTitle} data-tooltip={nextTitle} disabled={nextDisabled} onClick={onNext}>
             <INext size={18} strokeWidth={1.7} />
