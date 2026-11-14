@@ -309,6 +309,19 @@ pub fn start(app: AppHandle) {
     });
 }
 
+/// 等目录出现：每隔 interval 看一次；目录出现返回 true，keep_waiting 变 false（这一轮作废）返回 false。
+fn wait_for_dir(dir: &Path, interval: Duration, keep_waiting: impl Fn() -> bool) -> bool {
+    loop {
+        if dir.is_dir() {
+            return true;
+        }
+        if !keep_waiting() {
+            return false;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
 fn run(app: AppHandle, gen: u64, cfg: NasConfig, data_dir: Option<PathBuf>) {
     if cfg!(any(target_os = "android", target_os = "ios")) {
         return set_state(&app, gen, "error", UNSUPPORTED);
@@ -317,7 +330,13 @@ fn run(app: AppHandle, gen: u64, cfg: NasConfig, data_dir: Option<PathBuf>) {
 
     let media = cfg.media_dir.trim().to_string();
     if !Path::new(&media).is_dir() {
-        return set_state(&app, gen, "error", format!("媒体目录不存在或未挂载：{media}"));
+        // 共享没挂载（重启后 / 网络断开）：保持报错状态，但后台定期重试，挂上就自动起来，不用手动点重试
+        set_state(&app, gen, "error", format!("媒体目录不存在或未挂载：{media}（挂载后会自动重试）"));
+        let still_current = || NAS.lock().unwrap().generation == gen;
+        if !wait_for_dir(Path::new(&media), Duration::from_secs(5), still_current) {
+            return; // 用户重启 / 改了配置，这一轮作废
+        }
+        set_state(&app, gen, "starting", "媒体目录已就绪，正在启动…");
     }
     let Some(node) = find_node() else {
         return set_state(&app, gen, "error", "未找到 Node.js（需要 18 或更高版本）。请先安装：brew install node");
@@ -494,4 +513,52 @@ pub fn nas_configure(app: AppHandle, enabled: bool, media_dir: String, port: Opt
 pub fn nas_restart(app: AppHandle) -> NasStatus {
     start(app);
     status()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("hghubx-nas-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn waits_until_the_share_is_mounted() {
+        let dir = temp("appear");
+        let _ = std::fs::remove_dir_all(&dir);
+        let later = dir.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            std::fs::create_dir_all(&later).unwrap();
+        });
+        assert!(wait_for_dir(&dir, Duration::from_millis(20), || true), "目录出现后应返回 true");
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gives_up_when_this_round_is_superseded() {
+        let dir = temp("never");
+        let _ = std::fs::remove_dir_all(&dir);
+        let alive = Arc::new(AtomicBool::new(true));
+        let flag = alive.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            flag.store(false, Ordering::SeqCst); // 用户重启 / 改配置：代数变了
+        });
+        let a = alive.clone();
+        assert!(!wait_for_dir(&dir, Duration::from_millis(20), move || a.load(Ordering::SeqCst)), "这一轮作废后应返回 false");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn returns_immediately_when_already_mounted() {
+        let dir = temp("exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(wait_for_dir(&dir, Duration::from_secs(60), || true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
