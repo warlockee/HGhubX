@@ -82,7 +82,7 @@ const LS = appDataKey("default");
 const LEGACY_LS = "hghubx_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false, subMode: "both",
+  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false, subMode: "zh",
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -118,7 +118,15 @@ function loadPersist(): Persist {
         localStorage.setItem("hghubx_swipe_ep_v2", "1");
       }
     } catch { /* ignore */ }
-    return { ...p, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
+    /* 字幕默认显示中文。老配置里存的是当年的默认值（双语）或手动关掉的，做一次性迁移；之后用户自己改的不会再被动。 */
+    let subMode = p.subMode;
+    try {
+      if (localStorage.getItem("hghubx_sub_zh_v1") !== "1") {
+        subMode = "zh";
+        localStorage.setItem("hghubx_sub_zh_v1", "1");
+      }
+    } catch { /* ignore */ }
+    return { ...p, subMode, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
   }

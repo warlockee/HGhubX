@@ -105,26 +105,30 @@ try {
   await page.keyboard.press("Escape"); await page.waitForTimeout(150);
   assert.equal(await dialog.count(), 0, "Esc 关闭菜单");
 
-  // 默认双语：中文在上，原文在下
+  // 默认中文
   await page.evaluate(() => { document.querySelector("video").currentTime = 2; });
   await page.waitForFunction(() => document.querySelector('[aria-live="off"]'), null, { timeout: 4000 });
-  assert.equal(await subtitleText(page), "你好。|こんにちは。", "双语显示：中文 + 原文");
+  assert.equal(await subtitleText(page), "你好。", "默认只显示中文");
   // 没有字幕的时刻不显示
   await page.evaluate(() => { document.querySelector("video").currentTime = 10; });
   await page.waitForFunction(() => !document.querySelector('[aria-live="off"]'), null, { timeout: 4000 });
   await page.evaluate(() => { document.querySelector("video").currentTime = 6; });
   await page.waitForFunction(() => document.querySelector('[aria-live="off"]'), null, { timeout: 4000 });
-  assert.equal(await subtitleText(page), "我们看电影吧。|映画を見ましょう。");
+  assert.equal(await subtitleText(page), "我们看电影吧。");
 
-  // V：双语 → 中文 → 原文 → 关闭
-  await page.keyboard.press("v"); await page.waitForTimeout(200);
-  assert.equal(await subtitleText(page), "我们看电影吧。", "中文");
+  // V：中文 → 原文 → 关闭 → 双语 → 中文
   await page.keyboard.press("v"); await page.waitForTimeout(200);
   assert.equal(await subtitleText(page), "映画を見ましょう。", "原文");
   await page.keyboard.press("v"); await page.waitForTimeout(200);
   assert.equal(await subtitleText(page), "", "关闭");
   await page.keyboard.press("v"); await page.waitForTimeout(200);
-  assert.equal(await subtitleText(page), "我们看电影吧。|映画を見ましょう。", "再按回到双语");
+  assert.equal(await subtitleText(page), "我们看电影吧。|映画を見ましょう。", "双语");
+  await page.keyboard.press("v"); await page.waitForTimeout(200);
+  assert.equal(await subtitleText(page), "我们看电影吧。", "回到中文");
+  await page.keyboard.press("v"); await page.waitForTimeout(200);
+  await page.keyboard.press("v"); await page.waitForTimeout(200);
+  await page.keyboard.press("v"); await page.waitForTimeout(200);
+  assert.equal(await subtitleText(page), "我们看电影吧。|映画を見ましょう。", "转一圈到双语，下面的延后测试用双语");
 
   // ] 字幕延后 2 秒：t=6 时本该显示第二条，延后后应显示的是“t-2=4 附近”的内容（第一条 s=1..4 的末尾）
   for (let i = 0; i < 4; i++) await page.keyboard.press("]");
