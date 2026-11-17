@@ -198,6 +198,53 @@ export const parseTranslateProgress = (line) => { const m = /^PROGRESS (\d+)\/(\
 
 /* ───────────── 任务管理 ───────────── */
 
+/* ───────────── 影片同目录的现成字幕（.srt） ─────────────
+ * 比如在别的机器上批量生成好、放在影片旁边的：<影片名>.zh.srt（中文）+ <影片名>.ja.srt（原文）。
+ * 本机没有自己生成的字幕时直接用它们；只有中文那份也行。 */
+
+/** SRT 文本 → [{s,e,text}]（秒）。容错：BOM、CRLF、.或,分隔毫秒、<i> 之类标签、没有序号的块 */
+export function parseSrt(text) {
+  const out = [];
+  const ts = (h, m, sec, ms) => Number(h) * 3600 + Number(m) * 60 + Number(sec) + Number(ms.padEnd(3, "0").slice(0, 3)) / 1000;
+  for (const block of String(text || "").replace(/^\uFEFF/, "").split(/\r?\n\s*\r?\n/)) {
+    const lines = block.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const i = lines.findIndex((l) => l.includes("-->"));
+    if (i < 0) continue;
+    const m = /(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/.exec(lines[i]);
+    if (!m) continue;
+    const body = lines.slice(i + 1).join(" ").replace(/<[^>]+>|\{\\[^}]*\}/g, "").trim();
+    if (!body) continue;
+    out.push({ s: ts(m[1], m[2], m[3], m[4]), e: ts(m[5], m[6], m[7], m[8]), text: body });
+  }
+  return out;
+}
+
+/** 中文 + 原文两份按时间对齐成 {s,e,t,z}；原文缺失（或对不上的条目）只留中文 */
+export function pairSidecar(zh, orig) {
+  if (!orig?.length) return zh.map((c) => ({ s: c.s, e: c.e, t: c.text }));
+  let j = 0;
+  return zh.map((c) => {
+    while (j < orig.length - 1 && orig[j].s < c.s - 0.5) j++;
+    const o = [orig[j], orig[j + 1], orig[j - 1]].filter(Boolean).find((x) => Math.abs(x.s - c.s) <= 0.5);
+    return o ? { s: c.s, e: c.e, t: o.text, z: c.text } : { s: c.s, e: c.e, t: c.text };
+  });
+}
+
+const SIDE_ORIG = ["ja", "es", "en", "ko", "fr", "de", "ru", "pt", "it", "th", "vi", "id", "tr", "orig"];
+const SIDE_ZH = [".zh", ".zh-CN", ".zh-Hans", ".chs", ".zho", ""];
+const stripExt = (f) => f.replace(/\.[^./\\]+$/, "");
+/** 读影片旁边的字幕；没有（或解析不出内容）返回 null。read 可注入便于测试。 */
+export function loadSidecar(videoFile, read = (f) => { try { return fs.readFileSync(f, "utf8"); } catch { return null; } }) {
+  const base = stripExt(videoFile);
+  let zh = null;
+  for (const suf of SIDE_ZH) { const t = read(`${base}${suf}.srt`); const c = t && parseSrt(t); if (c?.length) { zh = c; break; } }
+  if (!zh) return null;
+  let orig = null, language = "zh";
+  for (const code of SIDE_ORIG) { const t = read(`${base}.${code}.srt`); const c = t && parseSrt(t); if (c?.length) { orig = c; language = code === "orig" ? "und" : code; break; } }
+  const cues = pairSidecar(zh, orig);
+  return { language, translated: cues.some((c) => c.z), note: "来自影片同目录的字幕文件", cues };
+}
+
 /**
  * @param {{ cacheDir: string, modelsDir: string, fileOf: (id:number, ep:number) => string|null,
  *           durationOf: (file:string) => Promise<number>, pathEnv?: string }} opts
@@ -241,7 +288,16 @@ export function createSubtitles({ cacheDir, modelsDir, fileOf, durationOf, pathE
   const queue = [];
   let busy = false;
 
-  const readCues = (id, ep) => { try { return JSON.parse(fs.readFileSync(path.join(dirOf(id, ep), "cues.json"), "utf8")); } catch { return null; } };
+  const readCues = (id, ep) => {
+    try { return JSON.parse(fs.readFileSync(path.join(dirOf(id, ep), "cues.json"), "utf8")); } catch { /* 本机没生成过，看影片旁边有没有现成的 */ }
+    const file = fileOf(id, ep);
+    if (!file) return null;
+    const side = loadSidecar(file);
+    if (!side) return null;
+    let version = "side";
+    try { version = "side" + Math.floor(fs.statSync(stripExt(file) + ".zh.srt").mtimeMs); } catch { /* 用默认 */ }
+    return { version, ...side };
+  };
 
   function status(id, ep) {
     const job = jobs.get(keyOf(id, ep));

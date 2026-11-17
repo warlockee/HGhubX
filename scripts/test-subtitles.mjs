@@ -179,3 +179,20 @@ test("内存检查：解析 vm_stat / 交换区，内存不足时不装大模型
   const mem = memoryStatus((cmd) => (cmd === "vm_stat" ? vm : "vm.swapusage: total = 6144.00M  used = 5490.38M  free = 653.62M"));
   assert.ok(process.platform !== "darwin" || (mem.swapFreeMB === 653.62 && mem.availMB > 2000));
 });
+
+test("同目录 .srt：解析、中原文对齐、只有中文也能用", async () => {
+  const { parseSrt, pairSidecar, loadSidecar } = await import("../nas-backend/subtitles.mjs");
+  const zhTxt = "﻿1\r\n00:00:01,500 --> 00:00:03,000\r\n<i>你好</i>\r\n\r\n2\r\n00:01:00.250 --> 00:01:02,000\r\n第一行\r\n第二行\r\n\r\n3\r\n00:02:00,000 --> 00:02:01,000\r\n\r\n";
+  const zh = parseSrt(zhTxt);
+  assert.deepEqual(zh, [{ s: 1.5, e: 3, text: "你好" }, { s: 60.25, e: 62, text: "第一行 第二行" }]);
+  const orig = parseSrt("1\n00:00:01,520 --> 00:00:03,000\nこんにちは\n");
+  assert.deepEqual(pairSidecar(zh, orig), [{ s: 1.5, e: 3, t: "こんにちは", z: "你好" }, { s: 60.25, e: 62, t: "第一行 第二行" }]);
+  assert.deepEqual(pairSidecar(zh, null)[0], { s: 1.5, e: 3, t: "你好" });
+  const files = { "/v/a.zh.srt": zhTxt, "/v/a.ja.srt": "1\n00:00:01,500 --> 00:00:03,000\nこんにちは\n", "/v/b.srt": zhTxt };
+  const read = (f) => files[f] ?? null;
+  const a = loadSidecar("/v/a.mp4", read);
+  assert.equal(a.language, "ja"); assert.ok(a.translated); assert.equal(a.cues[0].z, "你好");
+  const b = loadSidecar("/v/b.mkv", read);
+  assert.equal(b.language, "zh"); assert.ok(!b.translated);
+  assert.equal(loadSidecar("/v/c.mp4", read), null);
+});
