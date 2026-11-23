@@ -107,14 +107,36 @@ try {
   await queueEmpty(12000); // 播完后自动切到 D，D 成为当前视频、从队列消掉
   await page.waitForFunction((n) => window.__plays.includes(n), D, { timeout: 5000 });
 
-  // 6) 收起 / 展开：Esc 和 Q
-  await drawer.getByRole("button", { name: "收起" }).click(); await settle(150);
-  assert.equal(await drawer.count(), 0);
+  // 6) 收起 / 展开：按钮、Q、拖动（滑入 / 滑出）
+  const hidden = (want) => page.waitForFunction((w) => (document.querySelector('aside[aria-label="片库与队列"]').getAttribute("aria-hidden") === "true") === w, want, { timeout: 4000 });
+  const edge = () => page.evaluate(() => Math.round(document.querySelector('aside[aria-label="片库与队列"]').getBoundingClientRect().left));
+  await drawer.getByRole("button", { name: "收起" }).click(); await hidden(true); await settle(450);
+  assert.ok(await edge() >= 1190, `收起后整块滑出画面：left=${await edge()}`);
   assert.ok(await page.getByRole("button", { name: "片库与队列" }).isVisible());
-  await page.keyboard.press("q"); await settle(200);
-  assert.equal(await drawer.count(), 1, "Q 展开");
-  await page.keyboard.press("q"); await settle(200);
-  assert.equal(await drawer.count(), 0, "Q 收起");
+  await page.keyboard.press("q"); await hidden(false); await settle(450);
+  assert.ok(await edge() <= 822, `Q 展开后滑入：left=${await edge()}`);
+  await page.keyboard.press("q"); await hidden(true); await settle(450);
+  // 向左拖右缘的把手拉出来
+  const grip = await page.getByRole("button", { name: "拉出片库" }).boundingBox();
+  await page.mouse.move(grip.x + 8, grip.y + 30); await page.mouse.down();
+  await page.mouse.move(grip.x - 120, grip.y + 30, { steps: 6 });
+  assert.ok(await edge() < 1100, "拖动中抽屉跟手滑出来");
+  await page.mouse.move(grip.x - 300, grip.y + 30, { steps: 6 }); await page.waitForTimeout(250); await page.mouse.up();
+  await hidden(false); await settle(450);
+  assert.ok(await edge() <= 822, "拖过一半松手：展开");
+  // 向右拖标签栏的空白处收回去
+  const head = await drawer.getByRole("button", { name: "片库" }).boundingBox();
+  await page.mouse.move(head.x + 200, head.y + 16); await page.mouse.down();
+  await page.mouse.move(head.x + 440, head.y + 16, { steps: 6 }); await page.waitForTimeout(250); await page.mouse.up();
+  await hidden(true); await settle(450);
+  assert.ok(await edge() >= 1190, "向右拖过一半松手：收起");
+  // 拖一点点再放回去：弹回原位
+  await page.getByRole("button", { name: "片库与队列" }).click(); await hidden(false); await settle(450);
+  const head2 = await drawer.getByRole("button", { name: "片库" }).boundingBox();
+  await page.mouse.move(head2.x + 200, head2.y + 16); await page.mouse.down();
+  await page.mouse.move(head2.x + 240, head2.y + 16, { steps: 4 }); await page.waitForTimeout(700); await page.mouse.up();
+  await settle(450);
+  assert.ok(await edge() <= 822, "只拖了一点点：弹回展开状态");
 
   assert.deepEqual(pageErrors, [], `页面不应抛错：${pageErrors.join(" | ")}`);
   console.log("home-queue: all checks passed");

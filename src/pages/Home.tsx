@@ -110,6 +110,7 @@ export default function Home({ active, bottomInset, wide = true }: { active: boo
   }, [libraryEpoch]);
 
   /* 喂给播放器的列表 = 已看过的 + 播放队列 + 其余。队列增删时列表跟着变，播放器按 id 找回当前视频不跳。 */
+  const [reveal, setReveal] = useState({ px: wide ? 380 : 0, dragging: false }); // 抽屉当前露出多宽（拖动中实时变化）
   const [cur, setCur] = useState<number | undefined>(undefined);
   const shownRef = useRef<number[]>([]);
   const ids = useMemo(() => {
@@ -139,7 +140,7 @@ export default function Home({ active, bottomInset, wide = true }: { active: boo
     <div className="absolute inset-0 bg-black overflow-hidden">
       {items.length ? (
         /* 桌面宽屏：抽屉展开时把播放区让出来（不盖住画面）；窄屏抽屉是盖在上面的 */
-        <div className="absolute top-0 bottom-0 left-0" style={{ right: wide && browse.open ? 380 : 0 }}>
+        <div className="absolute top-0 bottom-0 left-0" style={{ right: wide ? reveal.px : 0, transition: reveal.dragging ? "none" : "right 300ms cubic-bezier(.32,.72,0,1)" }}>
           <Feed videoIds={ids} mode="home" active={active} bottomInset={bottomInset} onCurrent={onCurrent} jumpTo={jump}
             onNearEnd={() => { if (!loading && !done && Date.now() >= retryAt.current) load(page + 1); }} />
         </div>
@@ -159,7 +160,7 @@ export default function Home({ active, bottomInset, wide = true }: { active: boo
           <IList size={15} />片库{queue.length > 0 && <span className="px-1.5 rounded-full bg-white text-black text-[11px]">{queue.length}</span>}
         </button>
       )}
-      <BrowseDrawer wide={wide} />
+      <BrowseDrawer wide={wide} onReveal={(px, dragging) => setReveal((r) => (r.px === px && r.dragging === dragging ? r : { px, dragging }))} />
     </div>
   );
 }

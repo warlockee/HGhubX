@@ -24,7 +24,8 @@ const Btn = ({ title, onClick, children, on = false }: { title: string; onClick:
 
 /** 主播放器旁边的“片库 / 队列”抽屉：边看边逛，把想看的加进队列。
  *  播放器一直在后面播，这里只负责挑片子，所以不会打断当前的视频。 */
-export default function BrowseDrawer({ wide }: { wide: boolean }) {
+const WIDE_W = 380;
+export default function BrowseDrawer({ wide, onReveal }: { wide: boolean; onReveal?: (px: number, dragging: boolean) => void }) {
   const { browse, setBrowse, queue, enqueue, dequeue, promote, clearQueue, playNow, toast, libraryEpoch } = useStore();
   const { open, tab } = browse;
 
@@ -92,15 +93,55 @@ export default function BrowseDrawer({ wide }: { wide: boolean }) {
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) void load(page + 1, false);
   };
 
-  if (!open) return null;
-  const width = wide ? 380 : undefined;
+  /* —— 滑入 / 滑出：translateX 做动画；顶部标签栏和右缘的把手可以跟手拖动，松手按位置和速度决定收起还是展开 —— */
+  const asideRef = useRef<HTMLElement>(null);
+  const [drag, setDrag] = useState<number | null>(null); // 拖动中的 translateX（px），null = 不在拖
+  const gesture = useRef<{ x: number; base: number; t: number; moved: boolean; last: number } | null>(null);
+  const widthPx = () => asideRef.current?.offsetWidth || (wide ? WIDE_W : 380);
+  const onDown = (e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest("button,input")) { if (!(e.target as HTMLElement).closest("[data-grip]")) return; }
+    gesture.current = { x: e.clientX, base: open ? 0 : widthPx(), t: Date.now(), moved: false, last: e.clientX };
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
+  };
+  const onMove = (e: React.PointerEvent) => {
+    const g = gesture.current;
+    if (!g) return;
+    const dx = e.clientX - g.x;
+    if (Math.abs(dx) > 4) g.moved = true;
+    g.last = e.clientX;
+    if (g.moved) setDrag(Math.max(0, Math.min(widthPx(), g.base + dx)));
+  };
+  const onUp = () => {
+    const g = gesture.current;
+    gesture.current = null;
+    if (!g) return;
+    const W = widthPx();
+    const at = drag ?? g.base;
+    const speed = (g.last - g.x) / Math.max(1, Date.now() - g.t); // px/ms，向右为正
+    setDrag(null);
+    if (!g.moved) { if (!open) setBrowse({ open: true }); return; } // 点一下把手 = 展开
+    const wantOpen = speed > 0.5 ? false : speed < -0.5 ? true : at < W / 2;
+    setBrowse({ open: wantOpen });
+  };
+  const offset = drag ?? (open ? 0 : widthPx());
+  useEffect(() => { onReveal?.(Math.max(0, widthPx() - offset), drag != null); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [offset, drag, wide]);
 
   return (
-    <aside role="complementary" aria-label="片库与队列"
+    <>
+    {/* 收起时贴在右缘的把手：点一下展开，或向左拖出来 */}
+    <div data-grip role="button" aria-label="拉出片库" title="拉出片库"
+      onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+      className="absolute z-20 right-0 top-1/2 -translate-y-1/2 w-[18px] h-[72px] rounded-l-xl bg-black/55 backdrop-blur flex items-center justify-center cursor-grab touch-none"
+      style={{ opacity: open || drag != null ? 0 : 1, pointerEvents: open || drag != null ? "none" : "auto", transition: "opacity 200ms" }}>
+      <span className="block w-[3px] h-8 rounded-full bg-white/60" />
+    </div>
+    <aside ref={asideRef} role="complementary" aria-label="片库与队列" aria-hidden={!open && drag == null}
+      {...(!open && drag == null ? { inert: true } : {})}
       className="absolute top-0 bottom-0 right-0 z-30 flex flex-col bg-black/80 backdrop-blur-xl text-white border-l border-white/10"
-      style={{ width: width ?? "min(100%, 420px)", paddingTop: "var(--sat, 0px)" }}
+      style={{ width: wide ? WIDE_W : "min(100%, 420px)", paddingTop: "var(--sat, 0px)", transform: `translateX(${offset}px)`,
+        transition: drag != null ? "none" : "transform 300ms cubic-bezier(.32,.72,0,1)", visibility: !open && drag == null ? undefined : "visible" }}
       onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setBrowse({ open: false }); } }}>
-      <div className="shrink-0 flex items-center gap-1 px-3 pt-3 pb-2">
+      <div className="shrink-0 flex items-center gap-1 px-3 pt-3 pb-2 touch-none cursor-grab" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
         {([["browse", "片库"], ["queue", `队列${queue.length ? ` · ${queue.length}` : ""}`]] as const).map(([k, label]) => (
           <button key={k} onClick={() => setBrowse({ tab: k })} aria-pressed={tab === k}
             className={`px-3 h-8 rounded-full text-[13px] font-semibold pressable ${tab === k ? "bg-white text-black" : "bg-white/10 text-white/80 hover:bg-white/15"}`}>{label}</button>
@@ -179,5 +220,6 @@ export default function BrowseDrawer({ wide }: { wide: boolean }) {
         </>
       )}
     </aside>
+    </>
   );
 }
