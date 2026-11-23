@@ -5,6 +5,7 @@ import { appDataKey } from "../branding";
 import type { BootInfo, GateState, NasStatus, User } from "../types";
 import type { SubMode } from "../subtitles";
 import { libraryApi, LIBRARY_POLL_MS } from "../library";
+import { dequeue, enqueue, promote, type QueueItem } from "../queue";
 
 export type Platform = "android" | "ios" | "windows" | "macos" | "linux";
 export type Theme = "dark" | "light";
@@ -76,13 +77,15 @@ type Persist = {
   preferHevc: boolean;
   /** 字幕显示：关 / 中文 / 原文 / 双语（有字幕的视频才生效） */
   subMode: SubMode;
+  /** 接下来播放的队列：在首页主播放器里一部接一部播，可随时增删 */
+  queue: QueueItem[];
 };
 
 const LS = appDataKey("default");
 const LEGACY_LS = "hghubx_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false, subMode: "zh",
+  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false, subMode: "zh", queue: [],
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -126,7 +129,8 @@ function loadPersist(): Persist {
         localStorage.setItem("hghubx_sub_zh_v1", "1");
       }
     } catch { /* ignore */ }
-    return { ...p, subMode, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
+    const queue = Array.isArray(p.queue) ? p.queue.filter((x) => x && typeof x.id === "number") : [];
+    return { ...p, subMode, queue, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
   }
@@ -169,6 +173,18 @@ type Store = {
   muteOnStartup: boolean; setMuteOnStartup: (on: boolean) => void;
   swipeEp: boolean; setSwipeEp: (on: boolean) => void;
   subMode: SubMode; setSubMode: (m: SubMode) => void;
+  /** 播放队列：加入（next=true 排最前）/ 移除 / 提到最前 / 清空 */
+  queue: QueueItem[];
+  enqueue: (item: QueueItem, next?: boolean) => void;
+  dequeue: (id: number) => void;
+  promote: (id: number) => void;
+  clearQueue: () => void;
+  /** 立即播放：排到队首并让主播放器跳过去（n 每次 +1，保证重复点同一个也有反应） */
+  jump: { id: number; n: number } | null;
+  playNow: (item: QueueItem) => void;
+  /** 主播放器旁边的“片库 / 队列”抽屉 */
+  browse: { open: boolean; tab: "browse" | "queue" };
+  setBrowse: (v: Partial<{ open: boolean; tab: "browse" | "queue" }>) => void;
   preferHevc: boolean; setPreferHevc: (on: boolean) => void;
   volume: number; setVolume: (v: number) => void;
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
@@ -200,7 +216,7 @@ let seq = 0;
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [p, setP] = useState<Persist>(loadPersist);
   const [theme, setThemeState] = useState<Theme>(readTheme);
-  const [tab, setTabRaw] = useState<Tab>("category"); // 一打开先看分类
+  const [tab, setTabRaw] = useState<Tab>("home");
   const [stack, setStack] = useState<Page[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -482,6 +498,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setSubMode = useCallback((m: SubMode) => {
     setP((s) => ({ ...s, subMode: m }));
   }, []);
+  const [jump, setJump] = useState<{ id: number; n: number } | null>(null);
+  /* 一打开就把片库抽屉展开（先看分类），之后记不记得由用户当次操作决定，不持久化 */
+  const [browse, setBrowseState] = useState<{ open: boolean; tab: "browse" | "queue" }>({ open: true, tab: "browse" });
+  const setBrowse = useCallback((v: Partial<{ open: boolean; tab: "browse" | "queue" }>) => setBrowseState((b) => ({ ...b, ...v })), []);
+  const enqueueItem = useCallback((item: QueueItem, next = false) => setP((s) => ({ ...s, queue: enqueue(s.queue, item, next) })), []);
+  const dequeueItem = useCallback((id: number) => setP((s) => ({ ...s, queue: dequeue(s.queue, id) })), []);
+  const promoteItem = useCallback((id: number) => setP((s) => ({ ...s, queue: promote(s.queue, id) })), []);
+  const clearQueue = useCallback(() => setP((s) => (s.queue.length ? { ...s, queue: [] } : s)), []);
+  const playNow = useCallback((item: QueueItem) => {
+    setP((s) => ({ ...s, queue: enqueue(s.queue, item, true) }));
+    setJump((j) => ({ id: item.id, n: (j?.n ?? 0) + 1 }));
+  }, []);
   const setPreferHevc = useCallback((on: boolean) => {
     setP((s) => ({ ...s, preferHevc: on }));
   }, []);
@@ -503,6 +531,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     muteOnStartup: p.muteOnStartup, setMuteOnStartup,
     swipeEp: p.swipeEp, setSwipeEp,
     subMode: p.subMode, setSubMode,
+    queue: p.queue, enqueue: enqueueItem, dequeue: dequeueItem, promote: promoteItem, clearQueue, jump, playNow, browse, setBrowse,
     preferHevc: p.preferHevc, setPreferHevc,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
@@ -511,7 +540,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     nas, nasLoaded, configureNas, restartNas,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    setMuted, setMuteOnStartup, setSwipeEp, setSubMode, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
+    setMuted, setMuteOnStartup, setSwipeEp, setSubMode, enqueueItem, dequeueItem, promoteItem, clearQueue, jump, playNow, browse, setBrowse, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, lineEpoch, libraryEpoch, refreshLibrary, theater, setTheater, fs, setFs, clean, setClean,
     gate, gateReady, gateBusy, gateError, activateGate, resetGate, nas, nasLoaded, configureNas, restartNas]);
 

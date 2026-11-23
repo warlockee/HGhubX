@@ -74,7 +74,6 @@ export function DesktopRail({ collapsed }: { collapsed: boolean }) {
   const onTab = (key: Tab | "search") => !railPage && tab === key;
   const items: { key: Tab; label: string; Icon: typeof IHome; Filled: typeof IHomeF }[] = [
     { key: "home", label: "首页", Icon: IHome, Filled: IHomeF },
-    { key: "category", label: "分类", Icon: IGrid, Filled: IGridF },
     { key: "profile", label: "我的", Icon: IUser, Filled: IUserF },
   ];
   return (

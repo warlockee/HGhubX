@@ -25,7 +25,9 @@
     "test:subtitles": "node scripts/test-subtitles.mjs",
     "test:feed-subtitles": "node scripts/test-feed-subtitles.mjs",
     "test:library": "node scripts/test-library.mjs",
-    "test:shell": "node scripts/test-shell.mjs"
+    "test:shell": "node scripts/test-shell.mjs",
+    "test:queue": "node scripts/test-queue.mjs",
+    "test:home-queue": "node scripts/test-home-queue.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",

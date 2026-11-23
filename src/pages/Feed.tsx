@@ -35,6 +35,10 @@ type Props = {
   bottomInset: number;
   onBack?: () => void;
   onNearEnd?: () => void;
+  /** 当前播放的视频变了（首页用它把播放队列里已经轮到的那条消掉） */
+  onCurrent?: (id: number) => void;
+  /** 要求跳到某个视频（n 每次递增，重复点同一个也生效）；找不到该 id 时等列表更新后再试 */
+  jumpTo?: { id: number; n: number } | null;
   /** 从观看记录续播：起始集数与秒数 */
   startEp?: number;
   startTime?: number;
@@ -44,7 +48,7 @@ const RATES = [1, 1.25, 1.5, 2];
 
 const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
-export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, startEp, startTime }: Props) {
+export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, onCurrent, jumpTo, startEp, startTime }: Props) {
   const store = useStore();
   const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen, swipeEp, setSwipeEp, preferHevc, setPreferHevc } = store;
   const isDesktop = !isMobile;
@@ -133,6 +137,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const pinchRef = useRef<{ d0: number; mx0: number; my0: number; s0: number; x0: number; y0: number } | null>(null);
 
   const curId = videoIds[index];
+  const onCurrentRef = useRef(onCurrent);
+  onCurrentRef.current = onCurrent;
+  useEffect(() => { if (curId != null) onCurrentRef.current?.(curId); }, [curId]);
 
   /* 列表在播放中被换掉（片库刷新：剔除已删除的、追加新增的）：按 id 找回当前视频，别让画面跳到别的视频。
      只在中间有元素被剔除、位置发生了移动时才需要；末尾追加不影响。 */
@@ -149,6 +156,18 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const el = boxRef.current;
     if (el) el.scrollTo({ top: target * (el.clientHeight || 1), behavior: "instant" as ScrollBehavior });
   }, [videoIds]);
+  /* 外部要求跳到某个视频（从片库抽屉点“立即播放”）：直接定位过去，不做长距离的平滑滚动 */
+  const handledJump = useRef(0);
+  useEffect(() => {
+    if (!jumpTo || jumpTo.n === handledJump.current) return;
+    const i = videoIds.indexOf(jumpTo.id);
+    if (i < 0) return; // 列表还没带上它，等 videoIds 更新后会再进来
+    handledJump.current = jumpTo.n;
+    idxRef.current = i;
+    setIndex(i);
+    const el = boxRef.current;
+    if (el) el.scrollTo({ top: i * (el.clientHeight || 1), behavior: "instant" as ScrollBehavior });
+  }, [jumpTo, videoIds]);
   const detail = details[curId];
   const curEp = epMap[curId] || 1;
   const playKey = episodeKey(curId, curEp);
@@ -1022,7 +1041,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   onPlaying={() => { setPaused(false); setWaiting(false); }}
                   onPause={() => setPaused(true)}
                   onWaiting={() => setWaiting(true)}
-                  onEnded={() => { if (nextEp != null) pickEp(nextEp); }}
+                  onEnded={() => { if (nextEp != null) pickEp(nextEp); else if (mode === "home" && store.queue.length) go(1); /* 队列里有排着的，播完自动接下一个 */ }}
                   onError={(m) => {
                     setErr(m);
                     if (preferHevc && hevcUrl) {

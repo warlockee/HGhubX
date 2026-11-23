@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Feed from "./Feed";
 import { api } from "../api";
 import { libraryApi } from "../library";
 import type { VideoCard } from "../types";
 import { useStore } from "../store";
-import { ISearch } from "../icons";
+import { IList, ISearch } from "../icons";
 import { Empty } from "../components/ui";
+import BrowseDrawer from "../components/BrowseDrawer";
+import { composeList } from "../queue";
 
 /* Fisher-Yates 洗牌：首页第一页随机打乱，避免每次进来都停在同一个 top1 */
 function shuffle<T>(arr: T[]): T[] {
@@ -17,8 +19,8 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-export default function Home({ active, bottomInset }: { active: boolean; bottomInset: number }) {
-  const { toast, lineEpoch, libraryEpoch, gate } = useStore();
+export default function Home({ active, bottomInset, wide = true }: { active: boolean; bottomInset: number; wide?: boolean }) {
+  const { toast, lineEpoch, libraryEpoch, gate, queue, dequeue, jump, browse, setBrowse } = useStore();
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -107,13 +109,40 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [libraryEpoch]);
 
-  const ids = items.map((v) => v.id);
+  /* 喂给播放器的列表 = 已看过的 + 播放队列 + 其余。队列增删时列表跟着变，播放器按 id 找回当前视频不跳。 */
+  const [cur, setCur] = useState<number | undefined>(undefined);
+  const shownRef = useRef<number[]>([]);
+  const ids = useMemo(() => {
+    const next = composeList(shownRef.current, cur, queue.map((x) => x.id), items.map((v) => v.id));
+    shownRef.current = next;
+    return next;
+  }, [items, queue, cur]);
+  /* 轮到队列里的那一条（或用户直接翻到它）就把它从队列里消掉 */
+  const onCurrent = useCallback((id: number) => setCur(id), []);
+  useEffect(() => { if (cur != null && queue.some((x) => x.id === cur)) dequeue(cur); }, [cur, queue, dequeue]);
+
+  /* Q：展开 / 收起片库抽屉（输入框里打字时不触发） */
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.key.toLowerCase() !== "q") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || (t.tagName === "INPUT" && !["range", "checkbox", "button"].includes((t as HTMLInputElement).type)) || t.tagName === "TEXTAREA")) return;
+      e.preventDefault();
+      setBrowse({ open: !browse.open });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, browse.open, setBrowse]);
 
   return (
-    <div className="absolute inset-0 bg-black">
+    <div className="absolute inset-0 bg-black overflow-hidden">
       {items.length ? (
-        <Feed videoIds={ids} mode="home" active={active} bottomInset={bottomInset}
-          onNearEnd={() => { if (!loading && !done && Date.now() >= retryAt.current) load(page + 1); }} />
+        /* 桌面宽屏：抽屉展开时把播放区让出来（不盖住画面）；窄屏抽屉是盖在上面的 */
+        <div className="absolute top-0 bottom-0 left-0" style={{ right: wide && browse.open ? 380 : 0 }}>
+          <Feed videoIds={ids} mode="home" active={active} bottomInset={bottomInset} onCurrent={onCurrent} jumpTo={jump}
+            onNearEnd={() => { if (!loading && !done && Date.now() >= retryAt.current) load(page + 1); }} />
+        </div>
       ) : !loading && error ? (
         <div className="absolute inset-0 flex items-center justify-center bg-bg">
           <Empty icon={<ISearch size={26} />} title="首页加载失败" sub={error} action="重试" onAction={() => void load(1)} />
@@ -123,6 +152,14 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
       ) : (
         <div className="absolute inset-0 flex items-center justify-center"><div className="w-9 h-9 spinner" /></div>
       )}
+      {!browse.open && (
+        <button onClick={() => setBrowse({ open: true })} title="片库与队列 (Q)" aria-label="片库与队列"
+          className="absolute z-20 right-3 flex items-center gap-1.5 px-3 h-9 rounded-full bg-black/55 backdrop-blur text-white text-[12.5px] font-semibold pressable hover:bg-black/70"
+          style={{ top: "calc(var(--sat, 0px) + 12px)" }}>
+          <IList size={15} />片库{queue.length > 0 && <span className="px-1.5 rounded-full bg-white text-black text-[11px]">{queue.length}</span>}
+        </button>
+      )}
+      <BrowseDrawer wide={wide} />
     </div>
   );
 }

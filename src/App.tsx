@@ -6,7 +6,7 @@ import { addPluginListener } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
 import Search, { RankPage } from "./pages/Search";
-import Category, { ChannelPage } from "./pages/Category";
+import { ChannelPage } from "./pages/Category";
 import Profile from "./pages/Profile";
 import SettingsPage from "./pages/Settings";
 import Feed from "./pages/Feed";
@@ -35,14 +35,13 @@ function TabBar() {
   const items: { k: Tab; label: string; On: (p: { size?: number; className?: string; style?: React.CSSProperties; strokeWidth?: number }) => React.JSX.Element; Off: (p: { size?: number; className?: string; style?: React.CSSProperties; strokeWidth?: number }) => React.JSX.Element }[] = [
     { k: "home", label: "首页", On: IHomeF, Off: IHome },
     { k: "search", label: "搜索", On: ISearch, Off: ISearch },
-    { k: "category", label: "分类", On: IGridF, Off: IGrid },
     { k: "profile", label: "我的", On: IUserF, Off: IUser },
   ];
   const idx = items.findIndex((i) => i.k === tab);
   const overVideo = tab === "home";
   const light = !overVideo && theme === "light";
   /* 液滴中心对齐每个等分槽位的中心，定位不受固定胶囊宽度影响。 */
-  const dropLeft = `${12.5 + idx * 25}%`;
+  const dropLeft = `${100 / 6 + idx * (100 / 3)}%`;
   return (
     <nav className="hg-tabbar absolute inset-x-0 bottom-0 z-30 flex justify-center"
       style={{ paddingBottom: android ? "var(--sab, 0px)" : "calc(var(--sab, 0px) * 0.55)" }} aria-label="主导航">
@@ -70,7 +69,7 @@ function TabBar() {
           backdropFilter: "blur(10px) brightness(1.12)",
           WebkitBackdropFilter: "blur(10px) brightness(1.12)",
         }} />
-        <div className="relative h-full grid grid-cols-4">
+        <div className="relative h-full grid grid-cols-3">
           {items.map(({ k, label, On, Off }) => {
             const on = tab === k;
             const Icon = on ? On : Off;
@@ -149,8 +148,8 @@ function AppBody() {
       if (loginOpen) { if (e.key === "Escape") setLoginOpen(false); return; }
       if (e.key === "Escape") { if (!fs && stack.length) pop(); return; } // 全屏时 Esc 只用来退出全屏（播放页自己处理）
       if (e.key === "/") { e.preventDefault(); setTab("search"); return; }
-      if (["1", "2", "3", "4"].includes(e.key) && !e.repeat) {
-        setTab((["home", "search", "category", "profile"] as Tab[])[Number(e.key) - 1]);
+      if (["1", "2", "3"].includes(e.key) && !e.repeat) {
+        setTab((["home", "search", "profile"] as Tab[])[Number(e.key) - 1]);
       }
     };
     window.addEventListener("keydown", fn);
@@ -169,9 +168,8 @@ function AppBody() {
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!isMobile && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
+        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} wide={wide} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
-        <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
         <div className={vis("profile")}><Profile wide={wide} /></div>
 
         {stack.map((p, i) => (
@@ -265,8 +263,8 @@ function ShellInner({ collapsed, hideRail, theater }: { collapsed: boolean; hide
       if (loginOpen) { if (e.key === "Escape") setLoginOpen(false); return; }
       if (e.key === "Escape") { if (stack.length) pop(); return; }
       if (e.key === "/") { e.preventDefault(); setTab("search"); return; }
-      if (["1", "2", "3", "4"].includes(e.key) && !e.repeat) {
-        setTab((["home", "search", "category", "profile"] as Tab[])[Number(e.key) - 1]);
+      if (["1", "2", "3"].includes(e.key) && !e.repeat) {
+        setTab((["home", "search", "profile"] as Tab[])[Number(e.key) - 1]);
       }
     };
     window.addEventListener("keydown", fn);
@@ -280,9 +278,8 @@ function ShellInner({ collapsed, hideRail, theater }: { collapsed: boolean; hide
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!hideRail && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className={`relative flex-1 min-w-0 overflow-hidden win-main ${theater ? "is-theater-main" : ""}`}>
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} /></div>
+        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} wide={wide} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
-        <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
         <div className={vis("profile")}><Profile wide={wide} /></div>
         {stack.map((p, i) => (
           <div key={p.key} className="absolute inset-0 z-30 bg-bg win-page-in" style={{ boxShadow: "-18px 0 40px rgba(0,0,0,.5)" }}>
