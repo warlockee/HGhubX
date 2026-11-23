@@ -200,7 +200,7 @@ let seq = 0;
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [p, setP] = useState<Persist>(loadPersist);
   const [theme, setThemeState] = useState<Theme>(readTheme);
-  const [tab, setTabRaw] = useState<Tab>("home");
+  const [tab, setTabRaw] = useState<Tab>("category"); // 一打开先看分类
   const [stack, setStack] = useState<Page[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
